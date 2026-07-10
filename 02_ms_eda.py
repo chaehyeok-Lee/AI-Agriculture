@@ -277,9 +277,9 @@ for _, row in sample_rows.iterrows():
     save_sample_image(row["raw_path"], f"eda_outputs/sample_dat{sample_day}_loc{row['location']}.png")
 
 
-#이미지 상관관걔전 화질부터 정검해야함
+#이미지 상관관계 전 화질부터 점검해야함
 
-# 9. 전체 이미지 화질 점검 (노출 상태, 촬영 시각별 밝기 편차)
+# 9. 전체 이미지 화질 점검 (노출 상태, 촬영 시각별 밝기 편차) — train/test 둘 다 확인
 def image_quality_stats(raw_path):
     arr = np.fromfile(raw_path, dtype=np.uint16)
     cube = arr.reshape(BAND_COUNT, 1024, 1280).astype(float)
@@ -310,24 +310,24 @@ def check_all_quality(df, cache_path):
 train_quality = check_all_quality(train_ms, "cache/train_ms_quality.pkl")
 test_quality = check_all_quality(test_ms, "cache/test_ms_quality.pkl")
 
-print("\n=== train 이미지 밝기/노출 분포 요약 ===")
-print(train_quality[["img_mean", "img_std", "img_min", "img_max"]].describe())
+for name, quality in [("train", train_quality), ("test", test_quality)]:
+    print(f"\n=== {name} 이미지 밝기/노출 분포 요약 ===")
+    print(quality[["img_mean", "img_std", "img_min", "img_max"]].describe())
 
-# 유난히 어둡거나 밝은 이미지(전체 평균 기준 상하위 1%) 찾기
-low_cut = train_quality["img_mean"].quantile(0.01)
-high_cut = train_quality["img_mean"].quantile(0.99)
-print(f"\n하위 1% 밝기 기준: {low_cut:.1f}, 상위 1% 밝기 기준: {high_cut:.1f}")
-print(train_quality[train_quality["img_mean"] <= low_cut][["dat", "location", "dt", "img_mean"]])
-print(train_quality[train_quality["img_mean"] >= high_cut][["dat", "location", "dt", "img_mean"]])
+    low_cut = quality["img_mean"].quantile(0.01)
+    high_cut = quality["img_mean"].quantile(0.99)
+    print(f"\n{name} 하위 1% 밝기 기준: {low_cut:.1f}, 상위 1% 밝기 기준: {high_cut:.1f}")
+    print(quality[quality["img_mean"] <= low_cut][["dat", "location", "dt", "img_mean"]])
+    print(quality[quality["img_mean"] >= high_cut][["dat", "location", "dt", "img_mean"]])
 
-# 촬영 시각(시간대)에 따라 밝기가 얼마나 다른지 - 조명 영향 확인용
-train_quality["hour"] = (train_quality["dt"] % pd.Timedelta("1D")) / pd.Timedelta("1h")
-print("\n=== 시간대별 평균 밝기 ===")
-print(train_quality.groupby(train_quality["hour"].round())["img_mean"].mean())
+    quality["hour"] = (quality["dt"] % pd.Timedelta("1D")) / pd.Timedelta("1h")
+    print(f"\n=== {name} 시간대별 평균 밝기 ===")
+    print(quality.groupby(quality["hour"].round())["img_mean"].mean())
+
 
 # 10. 위치0의 상관관계가 진짜 이미지 신호인지, 그냥 날짜(계절) 효과인지 확인
 merged["day_num"] = merged.index // pd.Timedelta("1D")
-print("=== 그냥 '경과일수'와 정답의 상관관계 ===")
+print("\n=== 그냥 '경과일수'와 정답의 상관관계 ===")
 print(merged[["day_num"] + target_cols].corr().loc["day_num"])
 
 # 위치0이 있는 날짜만 따로 비교
@@ -337,54 +337,10 @@ print(f"\n위치0이 존재하는 날짜(dat): {sorted(loc0_days)}")
 print("\n=== 위치0 존재 구간만 필터링한 '경과일수' 상관관계 ===")
 print(merged.loc[mask, ["day_num"] + target_cols].corr().loc["day_num"])
 
-# 9. 전체 이미지 화질 점검 (노출 상태, 촬영 시각별 밝기 편차,오직 점검만)
-def image_quality_stats(raw_path):
-    arr = np.fromfile(raw_path, dtype=np.uint16)
-    cube = arr.reshape(BAND_COUNT, 1024, 1280).astype(float)
-    return pd.Series({
-        "img_mean": cube.mean(),
-        "img_std": cube.std(),
-        "img_min": cube.min(),
-        "img_max": cube.max(),
-    })
-
-
-def check_all_quality(df, cache_path):
-    if os.path.exists(cache_path):
-        return pd.read_pickle(cache_path)
-    n = len(df)
-    rows = []
-    start = time.time()
-    for i, p in enumerate(df["raw_path"]):
-        rows.append(image_quality_stats(p))
-        if (i + 1) % 50 == 0 or (i + 1) == n:
-            print(f"  품질체크 {i+1}/{n} ({time.time()-start:.1f}초 경과)")
-    quality = pd.DataFrame(rows)
-    quality = pd.concat([df.reset_index(drop=True), quality], axis=1)
-    quality.to_pickle(cache_path)
-    return quality
-
-
-train_quality = check_all_quality(train_ms, "cache/train_ms_quality.pkl")
-test_quality = check_all_quality(test_ms, "cache/test_ms_quality.pkl")
-
-print("\n=== train 이미지 밝기/노출 분포 요약 ===")
-print(train_quality[["img_mean", "img_std", "img_min", "img_max"]].describe())
-
-# 유난히 어둡거나 밝은 이미지(전체 평균 기준 상하위 1%) 찾기
-low_cut = train_quality["img_mean"].quantile(0.01)
-high_cut = train_quality["img_mean"].quantile(0.99)
-print(f"\n하위 1% 밝기 기준: {low_cut:.1f}, 상위 1% 밝기 기준: {high_cut:.1f}")
-print(train_quality[train_quality["img_mean"] <= low_cut][["dat", "location", "dt", "img_mean"]])
-print(train_quality[train_quality["img_mean"] >= high_cut][["dat", "location", "dt", "img_mean"]])
-
-# 촬영 시각(시간대)에 따라 밝기가 얼마나 다른지 - 조명 영향 확인용
-train_quality["hour"] = (train_quality["dt"] % pd.Timedelta("1D")) / pd.Timedelta("1h")
-print("\n=== 시간대별 평균 밝기 ===")
-print(train_quality.groupby(train_quality["hour"].round())["img_mean"].mean())
-
-# , 1023 = 2¹⁰-1, 즉 이 카메라 센서가 10비트(0~1023 범위)로 찍는 장비일 가능성이 높습니다. 
-# 그렇다면 값이 1023에 딱 걸리는 픽셀은 "더 밝은데 카메라가 못 찍고 잘라낸(포화/클리핑)" 픽셀일 수 있어요
-#  그냥 "며칠째인지"(day_num)만으로도 soil_moisture와 상관관계 0.717이 나왔습니다. 이건 이미지 없이 날짜 숫자 하나만 갖고도 이미 강한 예측력
-# 그런데 위치0이 존재하는 그 특정 7일(DAT121,123~128)만 따로 떼서 보면, day_num과 soil_moisture 상관관계는 -0.0096
+# 정리된 결론 (EDA 요약)
+# - img_max 최댓값이 1023 = 2^10-1 → 이 카메라 센서가 10비트(0~1023) 장비로 추정됨.
+#   1023에 딱 걸리는 픽셀은 포화(클리핑)됐을 가능성 있음 (실제 비율은 아직 안 셈, PLAN.md 참고)
+# - day_num(경과일수)만으로도 soil_moisture와 상관관계 0.717 → 매우 강한 단일 신호
+# - 위치0 존재 구간(DAT121,123~128)만 떼어보면 day_num-soil_moisture 상관관계는 -0.0096으로 거의 0
+#   → 위치0 이미지의 상관관계(0.30~0.37)가 날짜 우연이 아니라 실제 신호라는 근거
 

@@ -18,6 +18,7 @@ CLIP_RANGES = {
     "greenhouse_roof_vent1": (0.0, 59.0),
     "wind_speed_outside": (0.0, 8.28),
     "temperature": (-0.2, 26.1),  # 내부 온도
+    "humidity": (39.0, 100.0),  # 내부 습도
 }
 
 
