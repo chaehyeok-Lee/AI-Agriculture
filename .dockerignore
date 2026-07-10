@@ -1,0 +1,11 @@
+.venv
+.env
+dataset
+input
+output
+model
+cache
+eda_outputs
+*.pkl
+*.png
+__pycache__
