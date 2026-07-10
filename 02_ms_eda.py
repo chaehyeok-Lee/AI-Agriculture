@@ -1,6 +1,13 @@
+import os
 import re
-import pandas as pd
+import time
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # 화면 없이 파일로 저장
+import matplotlib.pyplot as plt
 
 
 def parse_ms_folder(base_dir):
@@ -36,14 +43,19 @@ def parse_ms_folder(base_dir):
     return pd.DataFrame(rows)
 
 
+# =========================================
 # 1. 전체 인덱스 테이블화
+# =========================================
 train_ms = parse_ms_folder("dataset/train/ms")
 test_ms = parse_ms_folder("dataset/test/ms")
 
 print("train_ms shape:", train_ms.shape)
 print("test_ms shape:", test_ms.shape)
 
+
+# =========================================
 # 2. 위치(location)별 하루당 세션 수 전수조사 (0번 위치가 정말 일부 날짜에만 있는지 확인)
+# =========================================
 print("\n=== train: DAT별 위치별 세션 수 ===")
 print(train_ms.groupby(["dat", "location"]).size().unstack(fill_value=0))
 
@@ -57,8 +69,10 @@ print("\ntrain 누락 파일 개수(hdr,row):", len(missing_train))
 print("test 누락 파일 개수(hdr,row):", len(missing_test))
 
 
+# =========================================
 # 3. 전체 hdr 스펙이 정말 모든 폴더에서 동일한지 전수 검증
 #    (지금까지는 샘플 몇 개만 手동으로 열어봤음 — 예외가 있는지 전부 확인)
+# =========================================
 def read_hdr_spec(path):
     spec = {}
     with open(path, encoding="utf-8") as f:
@@ -76,17 +90,21 @@ for name, df in [("train", train_ms), ("test", test_ms)]:
                    s.get("data type"), s.get("interleave"))
     )
 
-# 결과가 "1개" — 즉 639개 폴더 전부, 265개(다분광 이미지 개수) 폴더 전부가 예외 없이 (1280, 1024, 10, 12, bsq)라는 완전히 동일한 스펙이라는 뜻
-#촬영 규격 동일, (가로 픽셀,세로 픽셀,밴드 파장 개수,ㅇdata type, interleave=reshape) 순서로 튜플화해서 비교
+    # 결과가 "1개" — 즉 639개 폴더 전부, 265개(다분광 이미지 개수) 폴더 전부가 예외 없이
+    # (1280, 1024, 10, 12, bsq)라는 완전히 동일한 스펙이라는 뜻
+    # 촬영 규격 동일, (가로 픽셀,세로 픽셀,밴드 파장 개수,data type, interleave) 순서로 튜플화해서 비교
     print(f"\n{name} 고유 스펙 조합 개수:", key_tuple.nunique())
     print(key_tuple.value_counts())
 
-# 4. env dt와 매칭 준비: ms의 dt를 env dt 인덱스와 같은 timedelta 단위로 맞춰둠 (위 dt 컬럼)
-#    -> 다음 단계에서 train_ms/test_ms의 dt를 env의 dt에 merge_asof 등으로 매칭 가능
+# env dt와 매칭 준비: ms의 dt를 env dt 인덱스와 같은 timedelta 단위로 맞춰둠 (위 dt 컬럼)
+# -> 다음 단계에서 train_ms/test_ms의 dt를 env의 dt에 merge_asof 등으로 매칭 가능
 
-import os
 
+# =========================================
+# 4. raw 파일 크기 전수 검증 (hdr 스펙대로 정확한 바이트 수인지)
+# =========================================
 DTYPE_SIZE = {12: 2}  # ENVI data type 12 = uint16 (2바이트) — 이 데이터셋엔 12만 나왔음
+
 
 def check_raw_size(row):
     spec = read_hdr_spec(row["hdr_path"])
@@ -98,6 +116,7 @@ def check_raw_size(row):
     actual = os.path.getsize(row["raw_path"]) if row["raw_exists"] else None
     return pd.Series({"expected_bytes": expected, "actual_bytes": actual})
 
+
 for name, df in [("train", train_ms), ("test", test_ms)]:
     sizes = df.apply(check_raw_size, axis=1)
     df["expected_bytes"] = sizes["expected_bytes"]
@@ -107,26 +126,24 @@ for name, df in [("train", train_ms), ("test", test_ms)]:
     if len(mismatch):
         print(mismatch[["dat", "location", "dt", "raw_path", "expected_bytes", "actual_bytes"]])
 
-        # expected = samples × lines × bands × (dtype당 바이트 수)
-        #  = 1280 × 1024 × 10 × 2   (dtype 12=uint16이라 픽셀 1개당 2바이트)
-        #  = 26,214,400 바이트
+# expected = samples × lines × bands × (dtype당 바이트 수)
+#          = 1280 × 1024 × 10 × 2   (dtype 12=uint16이라 픽셀 1개당 2바이트)
+#          = 26,214,400 바이트
 
-import numpy as np
-import time
 
 BAND_COUNT = 10
 BAND_COLS = [f"band{i+1}_mean" for i in range(BAND_COUNT)]
 
 
-# 1. 이미지 1장에서 밴드별 평균 반사값(10개 숫자) 뽑기
 def read_band_means(raw_path):
+    """이미지 1장에서 밴드별 평균 반사값(10개 숫자) 뽑기"""
     arr = np.fromfile(raw_path, dtype=np.uint16)
     cube = arr.reshape(BAND_COUNT, 1024, 1280)  # BSQ: band, line, sample 순서
     return cube.mean(axis=(1, 2))  # 밴드별로 사진 전체 평균
 
 
-# 2. 모든 이미지에 대해 위 계산을 돌리고, 한 번 계산한 건 파일로 저장(캐시)해서 재실행 시 재계산 방지
 def extract_features(df, cache_path):
+    """모든 이미지에 대해 위 계산을 돌리고, 한 번 계산한 건 파일로 저장(캐시)해서 재실행 시 재계산 방지"""
     if os.path.exists(cache_path):
         return pd.read_pickle(cache_path)
 
@@ -148,13 +165,16 @@ def extract_features(df, cache_path):
     return feat
 
 
+# =========================================
+# 5. 이미지 → 수치 피처 변환 (밴드별 평균)
+# =========================================
 train_ms_feat = extract_features(train_ms, "cache/train_ms_features.pkl")
 test_ms_feat = extract_features(test_ms, "cache/test_ms_features.pkl")
 print("이미지 피처 추출 완료:", train_ms_feat.shape, test_ms_feat.shape)
 
 
-# 3. train_y와 동일한 5분 격자(기준 틀) 만들기
 def build_grid(start_day, n_days, freq="5min"):
+    """train_y와 동일한 5분 격자(기준 틀) 만들기"""
     start = pd.to_timedelta(start_day, unit="D")
     periods = n_days * 24 * 60 // 5
     return pd.timedelta_range(start=start, periods=periods, freq=freq)
@@ -166,8 +186,10 @@ print("\ntrain_grid:", train_grid.shape, "(기대: 7488행)")
 print("test_grid:", test_grid.shape, "(기대: 3456행)")
 
 
-# 4. 위치별로 "직전 촬영값을 다음 촬영 전까지 유지"(forward-fill) 매칭
+# =========================================
+# 6. 위치별로 "직전 촬영값을 다음 촬영 전까지 유지"(forward-fill) 매칭
 #    3시간 넘게 사진이 없으면 억지로 채우지 않고 결측으로 둠
+# =========================================
 FILL_LIMIT = pd.Timedelta("3h")
 
 
@@ -182,16 +204,14 @@ def attach_location_features(grid_df, feat_df, location):
         return grid_df
 
     loc_df["dt"] = loc_df["dt"].astype("timedelta64[ns]")
-    merged = pd.merge_asof(
+    merged_loc = pd.merge_asof(
         grid_df,
         loc_df[["dt"] + BAND_COLS],
         on="dt",
         direction="backward",   # 과거 방향으로 가장 가까운 값 = forward-fill
         tolerance=FILL_LIMIT,
     )
-    return merged.rename(columns={c: f"loc{location}_{c}" for c in BAND_COLS})
-
-
+    return merged_loc.rename(columns={c: f"loc{location}_{c}" for c in BAND_COLS})
 
 
 for location in [0, 1, 2, 3]:
@@ -199,7 +219,7 @@ for location in [0, 1, 2, 3]:
     test_grid = attach_location_features(test_grid, test_ms_feat, location)
 
 
-# 5. 위치 간 평균/표준편차 요약 컬럼 추가 (개별 위치 컬럼은 그대로 유지)
+# 위치 간 평균/표준편차 요약 컬럼 추가 (개별 위치 컬럼은 그대로 유지)
 for band_col in BAND_COLS:
     loc_cols = [f"loc{loc}_{band_col}" for loc in [0, 1, 2, 3]]
     train_grid[f"avg_{band_col}"] = train_grid[loc_cols].mean(axis=1)
@@ -208,7 +228,7 @@ for band_col in BAND_COLS:
     test_grid[f"std_{band_col}"] = test_grid[loc_cols].std(axis=1)
 
 
-# 6. 위치별로 실제 얼마나 채워졌는지(결측 비율) 확인
+# 위치별로 실제 얼마나 채워졌는지(결측 비율) 확인
 print("\n=== train: 위치별 결측 비율 ===")
 for location in [0, 1, 2, 3]:
     ratio = train_grid[f"loc{location}_{BAND_COLS[0]}"].isna().mean()
@@ -223,15 +243,13 @@ train_grid.to_pickle("cache/train_ms_matched.pkl")
 test_grid.to_pickle("cache/test_ms_matched.pkl")
 print("\n저장 완료: train_ms_matched.pkl, test_ms_matched.pkl")
 
-# 에러 없이 완료됐습니다. 위치0 결측 ~91%, 위치1/2/3 결측 7074% — 둘 다 "촬영 안 한 시간대가 많아서" 생기는 정상적인 결과입니다. 
-# train_ms_matched.pkl / test_ms_matched.pkl 저장 완료.
-
-import matplotlib
-matplotlib.use("Agg")  # 화면 없이 파일로 저장
-import matplotlib.pyplot as plt
+# 에러 없이 완료됐습니다. 위치0 결측 ~91%, 위치1/2/3 결측 70~74% — 둘 다 "촬영 안 한 시간대가 많아서"
+# 생기는 정상적인 결과입니다.
 
 
+# =========================================
 # 7. 이미지 피처 vs 정답(y) 상관관계
+# =========================================
 train_y = pd.read_csv("dataset/train/env/train_y.csv")
 dat_num = train_y["time"].str.extract(r"DAT(\d+)")[0].astype(int)
 hm = train_y["time"].str.split(" ").str[1]
@@ -249,7 +267,9 @@ print("\n전체 상관계수 표:")
 print(corr_table)
 
 
-# 8. 실제 사진 눈으로 확인 (같은 날, 위치별로 1장씩 저장) 상관관계 확인 및 이미지 시각화 진행
+# =========================================
+# 8. 실제 사진 눈으로 확인 (같은 날, 위치별로 1장씩 저장)
+# =========================================
 def save_sample_image(raw_path, out_path, band_index=5):
     arr = np.fromfile(raw_path, dtype=np.uint16)
     cube = arr.reshape(BAND_COUNT, 1024, 1280)
@@ -276,10 +296,14 @@ sample_rows = (
 for _, row in sample_rows.iterrows():
     save_sample_image(row["raw_path"], f"eda_outputs/sample_dat{sample_day}_loc{row['location']}.png")
 
+# 위치1/2/3: 딸기로 추정되는 톱니모양 잎사귀 근접 촬영, 캘리브레이션 기준판 동반
+# 위치0: 더 넓고 흐릿한 범위 (고정 카메라로 추정), 촬영 스케줄도 하루종일 30분 간격으로 다름
 
-#이미지 상관관계 전 화질부터 점검해야함
 
+# =========================================
 # 9. 전체 이미지 화질 점검 (노출 상태, 촬영 시각별 밝기 편차) — train/test 둘 다 확인
+#    (이미지 상관관계 분석 전에 화질부터 점검해야 함)
+# =========================================
 def image_quality_stats(raw_path):
     arr = np.fromfile(raw_path, dtype=np.uint16)
     cube = arr.reshape(BAND_COUNT, 1024, 1280).astype(float)
@@ -324,8 +348,14 @@ for name, quality in [("train", train_quality), ("test", test_quality)]:
     print(f"\n=== {name} 시간대별 평균 밝기 ===")
     print(quality.groupby(quality["hour"].round())["img_mean"].mean())
 
+# test 이미지가 train보다 평균 28% 더 밝음 (train 128.75 vs test 164.98) — 01_eda.py에서 확인한
+# "test 구간 solar_radiation 평균이 train보다 높다"는 사실과 교차검증됨 (겨울이라 기온은 낮지만
+# 맑은 날이 많아 일사량 자체는 더 강함). 이미지 피처를 모델에 쓸 경우 train/test 밝기 스케일 차이 주의.
 
+
+# =========================================
 # 10. 위치0의 상관관계가 진짜 이미지 신호인지, 그냥 날짜(계절) 효과인지 확인
+# =========================================
 merged["day_num"] = merged.index // pd.Timedelta("1D")
 print("\n=== 그냥 '경과일수'와 정답의 상관관계 ===")
 print(merged[["day_num"] + target_cols].corr().loc["day_num"])
@@ -337,10 +367,16 @@ print(f"\n위치0이 존재하는 날짜(dat): {sorted(loc0_days)}")
 print("\n=== 위치0 존재 구간만 필터링한 '경과일수' 상관관계 ===")
 print(merged.loc[mask, ["day_num"] + target_cols].corr().loc["day_num"])
 
-# 정리된 결론 (EDA 요약)
+
+# =========================================
+# EDA 요약
+# =========================================
+# - 위치 0/1/2/3 존재, 촬영 스펙(1280x1024x10밴드, uint16, bsq) 전 폴더 100% 동일, raw 파일 크기도 전부 정상
 # - img_max 최댓값이 1023 = 2^10-1 → 이 카메라 센서가 10비트(0~1023) 장비로 추정됨.
 #   1023에 딱 걸리는 픽셀은 포화(클리핑)됐을 가능성 있음 (실제 비율은 아직 안 셈, PLAN.md 참고)
 # - day_num(경과일수)만으로도 soil_moisture와 상관관계 0.717 → 매우 강한 단일 신호
 # - 위치0 존재 구간(DAT121,123~128)만 떼어보면 day_num-soil_moisture 상관관계는 -0.0096으로 거의 0
 #   → 위치0 이미지의 상관관계(0.30~0.37)가 날짜 우연이 아니라 실제 신호라는 근거
-
+# - test 이미지가 train보다 평균 28% 더 밝음 — solar_radiation 센서값 차이와 교차검증됨
+#
+# 자세한 내용/최신 상태는 README.md(핵심 분석 인사이트), PLAN.md(진행상황) 참고.
