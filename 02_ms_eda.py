@@ -369,6 +369,62 @@ print(merged.loc[mask, ["day_num"] + target_cols].corr().loc["day_num"])
 
 
 # =========================================
+# 11. 파장(밴드)별 패턴 검증 — "적색 경계(713,736nm) vs NIR 평탄부(759~920nm)" 그룹 가설을
+#     실제 데이터로 확인 (README.md의 도메인 지식 설명이 이 데이터에서도 맞는지 검증)
+# =========================================
+def get_wavelengths(hdr_path):
+    spec = read_hdr_spec(hdr_path)
+    wl_str = spec["wavelength"].strip("{}")
+    return [float(w.strip()) for w in wl_str.split(",")]
+
+
+wavelengths = get_wavelengths(train_ms["hdr_path"].iloc[0])
+print("\n밴드별 파장(nm):", wavelengths)
+
+band_idx = range(1, BAND_COUNT + 1)
+
+# ① 파장별 상관계수 그래프 — 위치 평균(avg_band) 기준, 타깃 3개 각각
+plt.figure(figsize=(10, 6))
+for target in target_cols:
+    rows = [f"avg_band{i}_mean" for i in band_idx]
+    plt.plot(wavelengths, corr_table.loc[rows, target].values, marker="o", label=target)
+plt.axvline(759, color="gray", linestyle="--", alpha=0.6, label="red edge 변곡점 추정(~759nm)")
+plt.xlabel("파장 (nm)")
+plt.ylabel("상관계수 (avg_band vs 정답)")
+plt.title("파장별 상관계수 — red edge vs NIR 평탄부 그룹 가설 검증")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig("eda_outputs/correlation_vs_wavelength.png", dpi=120)
+plt.close()
+print("저장: eda_outputs/correlation_vs_wavelength.png")
+
+# ② 실제 평균 분광 반사 곡선 — train 전체 이미지 평균 (밴드값 자체가 파장에 따라 어떻게 변하는지)
+mean_reflectance = train_ms_feat[BAND_COLS].mean()
+plt.figure(figsize=(10, 6))
+plt.plot(wavelengths, mean_reflectance.values, marker="o", color="darkgreen")
+plt.axvline(759, color="gray", linestyle="--", alpha=0.6, label="red edge 변곡점 추정(~759nm)")
+plt.xlabel("파장 (nm)")
+plt.ylabel("평균 반사값 (raw DN)")
+plt.title("평균 분광 반사 곡선 (train 전체 이미지 평균)")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig("eda_outputs/reflectance_spectrum.png", dpi=120)
+plt.close()
+print("저장: eda_outputs/reflectance_spectrum.png")
+
+# ③ 숫자로도 그룹 가설 확인 — 713,736 그룹 vs 759~920 그룹 상관계수 요약
+redge_rows = [f"avg_band{i}_mean" for i in [1, 2]]       # 713, 736nm
+nir_rows = [f"avg_band{i}_mean" for i in range(3, 11)]   # 759~920nm
+print("\n=== 그룹별 상관계수 요약 ===")
+print("적색 경계(713,736nm) 그룹:")
+print(corr_table.loc[redge_rows, target_cols])
+print("\nNIR 평탄부(759~920nm) 그룹 (평균):")
+print(corr_table.loc[nir_rows, target_cols].mean())
+
+
+# =========================================
 # EDA 요약
 # =========================================
 # - 위치 0/1/2/3 존재, 촬영 스펙(1280x1024x10밴드, uint16, bsq) 전 폴더 100% 동일, raw 파일 크기도 전부 정상
