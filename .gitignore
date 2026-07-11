@@ -10,3 +10,4 @@ eda_outputs
 __pycache__
 .ipynb_checkpoints
 .claude/
+.DS_Store
