@@ -46,16 +46,46 @@ def rmse(y_true, y_pred):
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
 
+# 마지막 4일 단일검증은 폴드 1개짜리라 노이즈에 취약(day_num 결정 때 실제로 결론이 뒤집힌 전례 있음).
+# 대신 학습 구간을 점점 늘려가며(expanding window) 4번 반복 검증하는 게 더 안정적인 지표 — 26.07.12 채택.
+# 예: 109~117일로 학습→118~121일 검증, 109~121일로 학습→122~125일 검증, ... (컷오프 4개)
+FOLD_CUTOFFS = [118, 122, 126, 130]
+
+
+def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
+    results = {c: [] for c in TARGET_COLS}
+    for cutoff in cutoffs:
+        train_mask = feat_df.index < pd.Timedelta(days=cutoff)
+        val_mask = (feat_df.index >= pd.Timedelta(days=cutoff)) & (feat_df.index < pd.Timedelta(days=cutoff + 4))
+        tr_feat, tr_y = feat_df[train_mask], target_y[train_mask]
+        val_feat, val_y = feat_df[val_mask], target_y[val_mask]
+        for col in TARGET_COLS:
+            cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
+            m = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1)
+            m.fit(tr_feat[cols], tr_y[col], eval_set=[(val_feat[cols], val_y[col])],
+                  callbacks=[lgb.early_stopping(50, verbose=False)])
+            pred = m.predict(val_feat[cols])
+            results[col].append(rmse(val_y[col].to_numpy(), pred))
+    return results
+
+
 def main():
     train_feat = build_features(pd.read_csv("dataset/train/env/train_X.csv"))
     train_feat = add_trend_features(train_feat)
     train_y = load_target("dataset/train/env/train_y.csv")
 
+    print("=== 4-fold 시계열 교차검증 (더 신뢰할 수 있는 지표) ===")
+    fold_results = run_folds(train_feat, train_y)
+    for col in TARGET_COLS:
+        arr = np.array(fold_results[col])
+        print(f"  {col}: folds={np.round(arr, 4)} mean={arr.mean():.4f} std={arr.std():.4f}")
+
     tr_feat, tr_y, val_feat, val_y = time_based_split(train_feat, train_y, val_days=4)
 
-    # 1단계: 마지막 4일을 val로 떼어내 early stopping으로 "적정 트리 개수"를 찾음 (성능 확인용)
+    # 1단계: 마지막 4일을 val로 떼어내 early stopping으로 "적정 트리 개수"를 찾음 (단일폴드, 참고용)
     # 2단계: 그 트리 개수 그대로, train 전체(26일)로 다시 학습해서 실제 제출용 모델을 만듦
     #        (val로 트리 개수만 정하고, 실제 모델은 가진 데이터를 전부 써야 test에 더 유리함)
+    print("\n=== 마지막 4일 단일검증 (참고용, 4-fold보다 신뢰도 낮음) ===")
     models = {}
     for col in TARGET_COLS:
         cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
