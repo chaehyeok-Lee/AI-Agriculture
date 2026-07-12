@@ -24,6 +24,23 @@ DROP_COLS_PER_TARGET = {
     "soil_temp": ["day_num"],
 }
 
+# X변수(구동기/날씨) 추세 피처: soil_ec가 circ_fan/천창 스케줄 변화(109~115 ON, 115~129 OFF, 129~134 ON)에
+# 계단형으로 반응한다는 분석(SUMMARY.md)에 착안. "최근 EC 추세"는 test에 정답이 없어 계산 불가(누수 함정)라
+# 대신 값을 아는 X변수의 "1일 전 대비 변화량"을 피처로 추가. 4-fold 검증에서 soil_moisture -4.2%,
+# soil_temp -5.5% 개선, soil_ec는 무변화(해롭지 않음) 확인 — 26.07.12.
+TREND_SRC_COLS = [
+    "circ_fan_mean", "greenhouse_roof_vent1_mean", "greenhouse_roof_vent2_mean",
+    "temperature_outside_mean", "humidity_outside_mean", "humidity_mean", "co2_mean",
+]
+TREND_WINDOW = 288  # 5분 격자 기준 288칸 = 1일
+
+
+def add_trend_features(feat_df, window=TREND_WINDOW):
+    feat_df = feat_df.copy()
+    for col in TREND_SRC_COLS:
+        feat_df[f"{col}_trend1d"] = feat_df[col] - feat_df[col].shift(window)
+    return feat_df
+
 
 def rmse(y_true, y_pred):
     return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -31,6 +48,7 @@ def rmse(y_true, y_pred):
 
 def main():
     train_feat = build_features(pd.read_csv("dataset/train/env/train_X.csv"))
+    train_feat = add_trend_features(train_feat)
     train_y = load_target("dataset/train/env/train_y.csv")
 
     tr_feat, tr_y, val_feat, val_y = time_based_split(train_feat, train_y, val_days=4)

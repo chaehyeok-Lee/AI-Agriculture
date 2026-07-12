@@ -3,10 +3,10 @@
 > 상세 기록/히스토리는 `PLAN.md`, 여긴 빠르게 찾아보는 용도
 
 ```
-생육환경 예측
-├─ 💧 soil_moisture   val RMSE 1.01   상태: 양호
-├─ 🧪 soil_ec         val RMSE 0.03   상태: 🚨 test 예측 뭉침 (미해결)
-└─ 🌡 soil_temp       val RMSE 1.25   상태: 양호
+생육환경 예측 (26.07.12, X변수 추세 피처 반영 후)
+├─ 💧 soil_moisture   val RMSE 0.99   상태: 양호 (추세 피처로 개선)
+├─ 🧪 soil_ec         val RMSE 0.03   상태: ⚠️ test 예측 뭉침 완화(104→207 고유값), 완전 해결은 아님
+└─ 🌡 soil_temp       val RMSE 1.26   상태: 양호
 ```
 
 ---
