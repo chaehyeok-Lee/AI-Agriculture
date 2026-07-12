@@ -53,29 +53,36 @@ def main():
 
     tr_feat, tr_y, val_feat, val_y = time_based_split(train_feat, train_y, val_days=4)
 
+    # 1단계: 마지막 4일을 val로 떼어내 early stopping으로 "적정 트리 개수"를 찾음 (성능 확인용)
+    # 2단계: 그 트리 개수 그대로, train 전체(26일)로 다시 학습해서 실제 제출용 모델을 만듦
+    #        (val로 트리 개수만 정하고, 실제 모델은 가진 데이터를 전부 써야 test에 더 유리함)
     models = {}
     for col in TARGET_COLS:
         cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
-        model = lgb.LGBMRegressor(
-            n_estimators=1000,
-            learning_rate=0.05,
-            random_state=RANDOM_STATE,
-            verbosity=-1,
+
+        val_model = lgb.LGBMRegressor(
+            n_estimators=1000, learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1,
         )
-        model.fit(
+        val_model.fit(
             tr_feat[cols], tr_y[col],
             eval_set=[(val_feat[cols], val_y[col])],
             callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
         )
-        pred = model.predict(val_feat[cols])
+        pred = val_model.predict(val_feat[cols])
         score = rmse(val_y[col].to_numpy(), pred)
-        print(f"{col} val RMSE: {score:.4f} (best_iteration={model.best_iteration_})")
-        models[col] = model
+        print(f"{col} val RMSE: {score:.4f} (best_iteration={val_model.best_iteration_})")
+
+        final_model = lgb.LGBMRegressor(
+            n_estimators=val_model.best_iteration_,
+            learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1,
+        )
+        final_model.fit(train_feat[cols], train_y[col])
+        models[col] = final_model
 
     os.makedirs("model", exist_ok=True)
     with open("model/model.pkl", "wb") as f:
         pickle.dump(models, f)
-    print("저장: model/model.pkl")
+    print("저장: model/model.pkl (train 전체 26일로 재학습된 최종 모델)")
 
 
 if __name__ == "__main__":
