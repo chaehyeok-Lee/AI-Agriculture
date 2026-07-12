@@ -3,10 +3,10 @@ Split ENVI multispectral cubes into band image files.
 
 Usage:
     # Process the current folder if it contains cube.hdr/cube.raw
-    python split_multispectral.py
+    python image.py
 
     # Process every child folder under a parent folder
-    python split_multispectral.py --root C:/Users/chaem/Desktop/dataset/train/ms
+    python image.py --root C:/Users/chaem/Desktop/dataset/train/ms
 
 For each cube folder, this creates:
     band_images/band_01_713nm.png
