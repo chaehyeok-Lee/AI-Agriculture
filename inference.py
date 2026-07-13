@@ -9,7 +9,10 @@ import pickle
 import pandas as pd
 
 from preprocess import build_features
-from train import DROP_COLS_PER_TARGET, TARGET_COLS, add_trend_features
+from train import (
+    DROP_COLS_PER_TARGET, TARGET_COLS,
+    add_trend_features, add_lag_features, add_rolling_features, add_cyclic_features,
+)
 
 COLUMNS = ["time", "soil_moisture", "soil_ec", "soil_temp"]
 EXPECTED_ROWS = 3456  # test 12일 * 5분 간격(288/일)
@@ -47,6 +50,9 @@ def main():
 
     test_feat = build_features(pd.read_csv("dataset/test/env/test_X.csv"))
     test_feat = add_trend_features(test_feat)
+    test_feat = add_lag_features(test_feat)
+    test_feat = add_rolling_features(test_feat)
+    test_feat = add_cyclic_features(test_feat)
 
     submission = pd.DataFrame({"time": format_time_index(test_feat.index)})
     for col in TARGET_COLS:

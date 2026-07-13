@@ -14,15 +14,6 @@ from preprocess import build_features, load_target, time_based_split
 
 RANDOM_STATE = 42
 TARGET_COLS = ["soil_moisture", "soil_ec", "soil_temp"]
-# day_num(경과일수): train(DAT109~134)과 test(DAT135~146) 날짜가 안 겹쳐서 트리 모델이 외삽해야 함.
-# 4-fold 시계열 교차검증(expanding window)으로 타깃별 확인한 결과 soil_moisture/soil_ec는
-# day_num이 있는 쪽이 확실히 낫고(외삽 위험보다 신호 가치가 큼), soil_temp만 없는 쪽이 나음
-# (day_num 의존도가 낮고 실제 온도 센서값이 더 잘 설명함) — 26.07.11 실험 확인.
-DROP_COLS_PER_TARGET = {
-    "soil_moisture": [],
-    "soil_ec": [],
-    "soil_temp": ["day_num"],
-}
 
 # X변수(구동기/날씨) 추세 피처: soil_ec가 circ_fan/천창 스케줄 변화(109~115 ON, 115~129 OFF, 129~134 ON)에
 # 계단형으로 반응한다는 분석(SUMMARY.md)에 착안. "최근 EC 추세"는 test에 정답이 없어 계산 불가(누수 함정)라
@@ -34,11 +25,74 @@ TREND_SRC_COLS = [
 ]
 TREND_WINDOW = 288  # 5분 격자 기준 288칸 = 1일
 
+# lag 피처: 토양 반응 지연 포착 — soil_temp는 내부온도 열관성(1~6h)에 효과적
+# soil_moisture는 day_num(0.72 상관) 중심이고 lag 피처가 노이즈로 작용해 제외 — 26.07.13 실험 확인
+LAG_SRC_COLS = [
+    "temperature_mean", "humidity_mean",
+    "circ_fan_mean", "greenhouse_roof_vent1_mean", "co2_mean",
+]
+LAG_STEPS = [12, 36, 72, 144, 288]  # 1h, 3h, 6h, 12h, 1일 (5분 격자 기준)
+LAG_FEATURE_NAMES = [f"{col}_lag{lag}" for col in LAG_SRC_COLS for lag in LAG_STEPS]
+# soil_moisture용: humidity lag만 허용(관수/증산 지연), 나머지 lag는 노이즈
+MOISTURE_LAG_EXCLUDE = [f"{col}_lag{lag}" for col in LAG_SRC_COLS for lag in LAG_STEPS
+                        if col != "humidity_mean"]
+
+# rolling window 피처: circ_fan 1일/2일 평균으로 환기 "체제(regime)" 포착 → soil_ec 계단 구조 반영
+# soil_temp는 rolling이 노이즈로 작용해 DROP_COLS_PER_TARGET에서 제외 — 26.07.13 실험 확인
+ROLL_SRC_COLS = [
+    "circ_fan_mean", "greenhouse_roof_vent1_mean",
+    "temperature_mean", "humidity_mean",
+]
+ROLL_WINDOWS = [288, 576]  # 1일, 2일 (5분 격자 기준)
+ROLL_FEATURE_NAMES = [f"{col}_roll{w}" for col in ROLL_SRC_COLS for w in ROLL_WINDOWS]
+
+# day_num(경과일수): train(DAT109~134)과 test(DAT135~146) 날짜가 안 겹쳐서 트리 모델이 외삽해야 함.
+# 4-fold 시계열 교차검증(expanding window)으로 타깃별 확인한 결과 soil_moisture/soil_ec는
+# day_num이 있는 쪽이 확실히 낫고(외삽 위험보다 신호 가치가 큼), soil_temp만 없는 쪽이 나음
+# (day_num 의존도가 낮고 실제 온도 센서값이 더 잘 설명함) — 26.07.11 실험 확인.
+DROP_COLS_PER_TARGET = {
+    "soil_moisture": LAG_FEATURE_NAMES,  # lag 피처 모두 노이즈 (humidity도 포함) — 26.07.13
+    "soil_ec": [],
+    "soil_temp": ["day_num"] + ROLL_FEATURE_NAMES,  # rolling mean 노이즈 — 26.07.13
+}
+
 
 def add_trend_features(feat_df, window=TREND_WINDOW):
     feat_df = feat_df.copy()
     for col in TREND_SRC_COLS:
         feat_df[f"{col}_trend1d"] = feat_df[col] - feat_df[col].shift(window)
+    return feat_df
+
+
+def add_lag_features(feat_df, lags=LAG_STEPS):
+    feat_df = feat_df.copy()
+    for col in LAG_SRC_COLS:
+        if col in feat_df.columns:
+            for lag in lags:
+                feat_df[f"{col}_lag{lag}"] = feat_df[col].shift(lag)
+    return feat_df
+
+
+def add_rolling_features(feat_df):
+    feat_df = feat_df.copy()
+    for col in ROLL_SRC_COLS:
+        if col in feat_df.columns:
+            for w in ROLL_WINDOWS:
+                feat_df[f"{col}_roll{w}"] = feat_df[col].rolling(w, min_periods=1).mean()
+            # std: 팬/온도 변동성 — 0이면 체제 안정, 크면 전환 중
+            feat_df[f"{col}_rollstd288"] = feat_df[col].rolling(288, min_periods=1).std().fillna(0)
+    # circ_fan 가속: 1일 평균 - 2일 평균 → 양수면 최근 팬 가동↑(EC 하락 신호), 음수면 ↓(EC 상승 신호)
+    if "circ_fan_mean_roll288" in feat_df.columns and "circ_fan_mean_roll576" in feat_df.columns:
+        feat_df["circ_fan_accel"] = feat_df["circ_fan_mean_roll288"] - feat_df["circ_fan_mean_roll576"]
+    return feat_df
+
+
+def add_cyclic_features(feat_df):
+    """hour를 sin/cos로 인코딩 — 트리가 23→0 연속성(자정 연속)을 학습하게"""
+    feat_df = feat_df.copy()
+    if "hour" in feat_df.columns:
+        feat_df["hour_sin"] = np.sin(2 * np.pi * feat_df["hour"] / 24)
+        feat_df["hour_cos"] = np.cos(2 * np.pi * feat_df["hour"] / 24)
     return feat_df
 
 
@@ -51,6 +105,14 @@ def rmse(y_true, y_pred):
 # 예: 109~117일로 학습→118~121일 검증, 109~121일로 학습→122~125일 검증, ... (컷오프 4개)
 FOLD_CUTOFFS = [118, 122, 126, 130]
 
+# soil_ec: 4-fold best_iteration 평균이 ~66으로 낮음 → lr을 절반으로 줄여 더 세밀하게 학습
+# soil_moisture/soil_temp: 기본 파라미터가 이 규모에 최적임을 실험으로 확인 — 26.07.13
+MODEL_PARAMS = {
+    "soil_moisture": {"n_estimators": 1000, "learning_rate": 0.05},
+    "soil_ec":       {"n_estimators": 2000, "learning_rate": 0.03, "num_leaves": 63},
+    "soil_temp":     {"n_estimators": 1000, "learning_rate": 0.05},
+}
+
 
 def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
     results = {c: [] for c in TARGET_COLS}
@@ -61,9 +123,9 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
         val_feat, val_y = feat_df[val_mask], target_y[val_mask]
         for col in TARGET_COLS:
             cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
-            m = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1)
+            m = lgb.LGBMRegressor(**MODEL_PARAMS[col], random_state=RANDOM_STATE, verbosity=-1)
             m.fit(tr_feat[cols], tr_y[col], eval_set=[(val_feat[cols], val_y[col])],
-                  callbacks=[lgb.early_stopping(50, verbose=False)])
+                  callbacks=[lgb.early_stopping(100, verbose=False)])
             pred = m.predict(val_feat[cols])
             results[col].append(rmse(val_y[col].to_numpy(), pred))
     return results
@@ -72,6 +134,9 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
 def main():
     train_feat = build_features(pd.read_csv("dataset/train/env/train_X.csv"))
     train_feat = add_trend_features(train_feat)
+    train_feat = add_lag_features(train_feat)
+    train_feat = add_rolling_features(train_feat)
+    train_feat = add_cyclic_features(train_feat)
     train_y = load_target("dataset/train/env/train_y.csv")
 
     print("=== 4-fold 시계열 교차검증 (더 신뢰할 수 있는 지표) ===")
@@ -90,13 +155,11 @@ def main():
     for col in TARGET_COLS:
         cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
 
-        val_model = lgb.LGBMRegressor(
-            n_estimators=1000, learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1,
-        )
+        val_model = lgb.LGBMRegressor(**MODEL_PARAMS[col], random_state=RANDOM_STATE, verbosity=-1)
         val_model.fit(
             tr_feat[cols], tr_y[col],
             eval_set=[(val_feat[cols], val_y[col])],
-            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+            callbacks=[lgb.early_stopping(stopping_rounds=100, verbose=False)],
         )
         pred = val_model.predict(val_feat[cols])
         score = rmse(val_y[col].to_numpy(), pred)
@@ -104,7 +167,8 @@ def main():
 
         final_model = lgb.LGBMRegressor(
             n_estimators=val_model.best_iteration_,
-            learning_rate=0.05, random_state=RANDOM_STATE, verbosity=-1,
+            learning_rate=MODEL_PARAMS[col]["learning_rate"],
+            random_state=RANDOM_STATE, verbosity=-1,
         )
         final_model.fit(train_feat[cols], train_y[col])
         models[col] = final_model
