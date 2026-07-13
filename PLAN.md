@@ -1,12 +1,16 @@
 # 온라인테스트1 진행 현황
 
-마지막 정리: 2026-07-12 (최종모델을 train 전체로 재학습하도록 수정 — soil_ec 뭉침 한 번 더 완화. 이미지 피처는 최종 종료)
+마지막 정리: 2026-07-13 (FEEDBACK.md 셀프 피드백 루프로 lag/rolling/cyclic 피처 추가, soil_temp -22% 대폭 개선. inference.py 동기화 버그 발견·수정)
 
 ## 📌 전체 상태 한눈에
 
-- 1~5단계(센서EDA/다분광EDA/전처리/베이스라인모델/추론) 전부 1차 완료 + 추세 피처로 1차 개선 완료
-- val RMSE(공식, 마지막4일 단일검증): soil_moisture 0.9886 / soil_ec 0.0334 / soil_temp 1.2575
-- 🚨 미해결 이슈(완화됐지만 미완전): **soil_ec 실제 test 예측 뭉침** — 고유값 104→207개로 완화, 완전 해결은 아님 (아래 "soil_ec" 항목 참고)
+- 1~5단계(센서EDA/다분광EDA/전처리/베이스라인모델/추론) 전부 1차 완료 + 추세/lag/rolling/cyclic 피처로 개선 완료
+- val RMSE(4-fold, 신뢰도 높음): soil_moisture 1.0638 / soil_ec 0.3078 / soil_temp 0.8392 (직전 대비 각각 -5.0%/-0.9%/-22.1%)
+- 🆕 **`FEEDBACK.md`에 별도 셀프 피드백 루프 기록 시작** — lag/rolling 피처, 하이퍼파라미터 튜닝(롤백됨) 실험 이력
+- 🆕 **inference.py가 train.py 피처 변경(lag/rolling/cyclic 추가)을 못 따라가서 예측이 아예 깨지는 버그 발견·수정 (26.07.13)** —
+  `add_lag_features`/`add_rolling_features`/`add_cyclic_features` 호출 누락 → LightGBM 피처 개수 불일치 에러.
+  train.py/inference.py는 피처 파이프라인을 반드시 동일하게 유지해야 함 — 앞으로 train.py에 피처 함수 추가 시 inference.py도 같이 확인할 것
+- 🚨 미해결 이슈(완화됐지만 미완전): **soil_ec 실제 test 예측 뭉침** — (아래 "soil_ec" 항목 참고)
 - 다음 진행 후보: input/dataset 경로 전환, Docker 재검증, 다분광 이미지는 종료(재시도 안 함)
 - ✅ **3인 전문가 3라운드 검토 완료 (26.07.12)** — "최대한 보수적으로" 조건 하에 train.py/inference.py 재검토.
   화방주기 가설 하드코딩(미검증), 마스킹 재시도, 하이퍼파라미터 추가 조정은 전부 "보수적이지 않음"으로 기각.
