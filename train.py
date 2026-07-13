@@ -73,7 +73,7 @@ import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
-from preprocess import build_features, load_target, time_based_split
+from preprocess import build_features, load_target
 
 RANDOM_STATE = 42
 TARGET_COLS = ["soil_moisture", "soil_ec", "soil_temp"]
@@ -222,17 +222,26 @@ def add_rolling_features(feat_df):
 
 
 def add_cyclic_features(feat_df):
-    """hour(0~24)를 sin/cos 두 컬럼으로 바꿔서 "자정에 값이 이어진다"는 걸 알려줌.
+    """hour(0~24), wind_direction_outside(0~360도)를 sin/cos로 바꿔 "원형 연속성"을 알려줌.
 
     hour를 숫자 그대로(0~24) 쓰면 트리 입장에서 23시와 0시가 "가장 먼 값"처럼
     보여서 하루의 끝과 시작이 이어진다는 걸 모름. sin/cos 두 값의 조합으로
     표현하면 원 위의 좌표처럼 23시와 0시가 실제로 가깝게 인코딩됨 (과거 시점을
     보는 피처는 아니고, 지금 이 순간이 하루 중 어디쯤인지를 다르게 표현하는 것).
+
+    wind_direction_outside도 같은 문제(0도와 360도가 실제로는 같은 방향인데 숫자로는
+    가장 먼 값) — 지금까지 원본 각도값 그대로 mean/max/min/std/last 집계돼 있었음(예:
+    350도와 10도의 평균이 180도로, 실제 평균 방향과 정반대가 되는 오류). 4-fold 검증
+    결과 moisture -0.3%, temp -0.7%, ec 무변화(해롭지 않음) — 26.07.13 채택.
     """
     feat_df = feat_df.copy()
     if "hour" in feat_df.columns:
         feat_df["hour_sin"] = np.sin(2 * np.pi * feat_df["hour"] / 24)
         feat_df["hour_cos"] = np.cos(2 * np.pi * feat_df["hour"] / 24)
+    if "wind_direction_outside_mean" in feat_df.columns:
+        rad = np.deg2rad(feat_df["wind_direction_outside_mean"])
+        feat_df["wind_dir_sin"] = np.sin(rad)
+        feat_df["wind_dir_cos"] = np.cos(rad)
     return feat_df
 
 
@@ -288,9 +297,14 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
     하이퍼파라미터가 얼마나 좋은지" 점수만 얻으려는 목적. 실제 제출용 모델은 main()에서
     따로(전체 데이터로) 학습함.
 
-    Returns: {"soil_moisture": [폴드1 RMSE, 폴드2 RMSE, ...], "soil_ec": [...], "soil_temp": [...]}
+    Returns: (results, fold_iters) 튜플.
+      results: {"soil_moisture": [폴드1 RMSE, ...], "soil_ec": [...], "soil_temp": [...]}
+      fold_iters: {"soil_moisture": [폴드1 best_iteration_, ...], ...} — early stopping이
+        찾은 "적정 트리 개수". main()에서 최종 n_estimators를 정할 때 재사용함(마지막 4일
+        단일분할보다 4-fold 평균이 노이즈에 강함 — 244행 주석과 동일한 원칙 — 26.07.13).
     """
     results = {c: [] for c in TARGET_COLS}
+    fold_iters = {c: [] for c in TARGET_COLS}
     for cutoff in cutoffs:
         # 학습 = 맨 처음부터 cutoff 직전까지(누적/expanding), 검증 = cutoff부터 4일간
         train_mask = feat_df.index < pd.Timedelta(days=cutoff)
@@ -302,6 +316,7 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
             m = lgb.LGBMRegressor(**MODEL_PARAMS[col], random_state=RANDOM_STATE, verbosity=-1)
             m.fit(tr_feat[cols], tr_y[col], eval_set=[(val_feat[cols], val_y[col])],
                   callbacks=[lgb.early_stopping(100, verbose=False)])
+            fold_iters[col].append(m.best_iteration_)
             pred_lgbm = m.predict(val_feat[cols])
 
             if col == "soil_temp":
@@ -318,7 +333,7 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
                 pred = pred_lgbm
 
             results[col].append(rmse(val_y[col].to_numpy(), pred))
-    return results
+    return results, fold_iters
 
 
 def main():
@@ -334,40 +349,37 @@ def main():
     # --- 2. 4-fold 교차검증으로 "지금 이 피처/하이퍼파라미터 조합이 얼마나 좋은지" 먼저 확인 ---
     #        (실제 제출 모델 학습 전에 참고용으로만 찍어보는 것 — 여기서 만든 모델은 버려짐)
     print("=== 4-fold 시계열 교차검증 (더 신뢰할 수 있는 지표) ===")
-    fold_results = run_folds(train_feat, train_y)
+    fold_results, fold_iters = run_folds(train_feat, train_y)
+    # 학습 데이터 크기(=cutoff, expanding window) 비례 가중 평균 — 참고 지표이자,
+    # 아래 production n_estimators 산출에도 재사용함 (뒤 fold일수록 최종 제출 모델(전체
+    # 데이터 학습)과 학습 크기가 가까워서 더 대표성이 높다는 근거).
+    fold_weights = np.array(FOLD_CUTOFFS, dtype=float)
+    n_estimators_per_target = {}
     for col in TARGET_COLS:
         arr = np.array(fold_results[col])
-        print(f"  {col}: folds={np.round(arr, 4)} mean={arr.mean():.4f} std={arr.std():.4f}")
+        weighted_mean = np.average(arr, weights=fold_weights)
+        iters = np.array(fold_iters[col], dtype=float)
+        n_estimators_per_target[col] = int(round(np.average(iters, weights=fold_weights)))
+        print(f"  {col}: folds={np.round(arr, 4)} mean={arr.mean():.4f} std={arr.std():.4f} "
+              f"weighted_mean(train_size)={weighted_mean:.4f} | best_iters={iters.astype(int).tolist()} "
+              f"-> n_estimators={n_estimators_per_target[col]}")
 
-    tr_feat, tr_y, val_feat, val_y = time_based_split(train_feat, train_y, val_days=4)
-
-    # --- 3. 실제 제출용 모델 만들기 (2단계로 진행) ---
-    # 1단계: 마지막 4일을 val로 떼어내 early stopping으로 "적정 트리 개수"를 찾음 (단일폴드, 참고용)
-    # 2단계: 그 트리 개수 그대로, train 전체(26일)로 다시 학습해서 실제 제출용 모델을 만듦
-    #        (val로 트리 개수만 정하고, 실제 모델은 가진 데이터를 전부 써야 test에 더 유리함)
-    print("\n=== 마지막 4일 단일검증 (참고용, 4-fold보다 신뢰도 낮음) ===")
+    # --- 3. 실제 제출용 모델 학습 ---
+    # n_estimators는 예전엔 "마지막 4일 단일분할" early stopping 하나로만 정했음(노이즈에
+    # 취약 — 위 4-fold RMSE와 같은 이유). 그 단일분할은 fold4(cutoff=130)와 검증 구간이
+    # ~75% 겹쳐 사실상 중복 학습이기도 했음 → 제거하고, 위에서 이미 계산한 4-fold
+    # best_iteration_의 학습크기 가중평균을 그대로 씀 (26.07.13, 성능 리뷰 후 정리).
+    # MODEL_PARAMS[col]을 통째로 풀어써서 soil_ec의 min_child_samples=50(그리드서치로 찾은
+    # 값)이 최종 모델에서 누락되던 버그도 함께 수정함 — 예전엔 n_estimators/learning_rate만
+    # 수동으로 뽑아 쓰느라 이 파라미터가 조용히 빠져 있었음.
+    print("\n=== 최종 모델 학습 (train 전체 26일, n_estimators는 4-fold 가중평균 고정값) ===")
     models = {}
     for col in TARGET_COLS:
-        cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
+        cols = [c for c in train_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
 
-        # 1단계: val 4일로 early stopping → 이 조합에 맞는 "적정 트리 개수" 탐색
-        val_model = lgb.LGBMRegressor(**MODEL_PARAMS[col], random_state=RANDOM_STATE, verbosity=-1)
-        val_model.fit(
-            tr_feat[cols], tr_y[col],
-            eval_set=[(val_feat[cols], val_y[col])],
-            callbacks=[lgb.early_stopping(stopping_rounds=100, verbose=False)],
-        )
-        pred = val_model.predict(val_feat[cols])
-        score = rmse(val_y[col].to_numpy(), pred)
-        print(f"{col} val RMSE: {score:.4f} (best_iteration={val_model.best_iteration_})")
-
-        # 2단계: 위에서 찾은 트리 개수(best_iteration_)를 고정값으로 써서, 이번엔 val 없이
-        #        train 26일 전체로 재학습 → 이게 model.pkl에 실제로 저장되는 모델
-        final_lgbm = lgb.LGBMRegressor(
-            n_estimators=val_model.best_iteration_,
-            learning_rate=MODEL_PARAMS[col]["learning_rate"],
-            random_state=RANDOM_STATE, verbosity=-1,
-        )
+        final_params = {**MODEL_PARAMS[col], "n_estimators": n_estimators_per_target[col],
+                         "random_state": RANDOM_STATE, "verbosity": -1}
+        final_lgbm = lgb.LGBMRegressor(**final_params)
         final_lgbm.fit(train_feat[cols], train_y[col])
 
         if col == "soil_temp":
