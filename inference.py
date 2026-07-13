@@ -12,6 +12,7 @@ from preprocess import build_features
 from train import (
     DROP_COLS_PER_TARGET, TARGET_COLS,
     add_trend_features, add_lag_features, add_rolling_features, add_cyclic_features,
+    BlendModel,  # noqa: F401 — pickle이 역직렬화 시 참조
 )
 
 COLUMNS = ["time", "soil_moisture", "soil_ec", "soil_temp"]
@@ -48,11 +49,21 @@ def main():
     with open("model/model.pkl", "rb") as f:
         models = pickle.load(f)
 
-    test_feat = build_features(pd.read_csv("dataset/test/env/test_X.csv"))
-    test_feat = add_trend_features(test_feat)
-    test_feat = add_lag_features(test_feat)
-    test_feat = add_rolling_features(test_feat)
-    test_feat = add_cyclic_features(test_feat)
+    # train_X + test_X를 이어붙여 피처 계산 후 test 구간만 슬라이싱.
+    # lag/rolling 피처는 과거 값을 참조하는데, test_X만 단독 처리하면 DAT135 첫 1일(lag288=1일)이
+    # 훈련 마지막 날 컨텍스트 없이 NaN이 됨 — cold start 문제. 연결 처리로 해결.
+    train_raw = pd.read_csv("dataset/train/env/train_X.csv")
+    test_raw  = pd.read_csv("dataset/test/env/test_X.csv")
+    combined_raw = pd.concat([train_raw, test_raw], ignore_index=True)
+
+    combined_feat = build_features(combined_raw)
+    combined_feat = add_trend_features(combined_feat)
+    combined_feat = add_lag_features(combined_feat)
+    combined_feat = add_rolling_features(combined_feat)
+    combined_feat = add_cyclic_features(combined_feat)
+
+    # test 구간(DAT135~)만 잘라냄 — train 부분은 컨텍스트 공급 역할만 하고 버림
+    test_feat = combined_feat[combined_feat.index >= pd.Timedelta(days=135)]
 
     submission = pd.DataFrame({"time": format_time_index(test_feat.index)})
     for col in TARGET_COLS:

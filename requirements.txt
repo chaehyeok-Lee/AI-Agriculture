@@ -6,3 +6,4 @@ lightgbm==4.6.0
 scikit-learn==1.9.0
 Pillow==12.3.0
 openpyxl==3.1.5
+scipy==1.18.0

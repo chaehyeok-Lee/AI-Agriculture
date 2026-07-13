@@ -1,27 +1,50 @@
 # 온라인테스트1 진행 현황
 
-마지막 정리: 2026-07-13 (FEEDBACK.md 셀프 피드백 루프로 lag/rolling/cyclic 피처 추가, soil_temp -22% 대폭 개선. inference.py 동기화 버그 발견·수정)
+마지막 정리: 2026-07-13 (셀프 피드백 루프 3회 완료 — lag/rolling/cyclic/앙상블 피처 추가, soil_temp -29.1% 개선, inference cold start 수정)
 
-## 📌 전체 상태 한눈에
+## 📌 전체 상태 한눈에 (26.07.13 최종)
 
-- 1~5단계(센서EDA/다분광EDA/전처리/베이스라인모델/추론) 전부 1차 완료 + 추세/lag/rolling/cyclic 피처로 개선 완료
-- val RMSE(4-fold, 신뢰도 높음): soil_moisture 1.0638 / soil_ec 0.3078 / soil_temp 0.8392 (직전 대비 각각 -5.0%/-0.9%/-22.1%)
-- 🆕 **`FEEDBACK.md`에 별도 셀프 피드백 루프 기록 시작** — lag/rolling 피처, 하이퍼파라미터 튜닝(롤백됨) 실험 이력
-- 🆕 **inference.py가 train.py 피처 변경(lag/rolling/cyclic 추가)을 못 따라가서 예측이 아예 깨지는 버그 발견·수정 (26.07.13)** —
-  `add_lag_features`/`add_rolling_features`/`add_cyclic_features` 호출 누락 → LightGBM 피처 개수 불일치 에러.
-  train.py/inference.py는 피처 파이프라인을 반드시 동일하게 유지해야 함 — 앞으로 train.py에 피처 함수 추가 시 inference.py도 같이 확인할 것
-- 🚨 미해결 이슈(완화됐지만 미완전): **soil_ec 실제 test 예측 뭉침** — (아래 "soil_ec" 항목 참고)
-- 다음 진행 후보: input/dataset 경로 전환, Docker 재검증, 다분광 이미지는 종료(재시도 안 함)
-- ✅ **3인 전문가 3라운드 검토 완료 (26.07.12)** — "최대한 보수적으로" 조건 하에 train.py/inference.py 재검토.
-  화방주기 가설 하드코딩(미검증), 마스킹 재시도, 하이퍼파라미터 추가 조정은 전부 "보수적이지 않음"으로 기각.
-  유일하게 채택된 안전한 개선: **submission.csv 검증 로직 추가**(`inference.py`의 `validate_submission`) —
-  컬럼/행개수(3456)/NaN/중복시각/값범위(soil_moisture 0~100, soil_ec 0~10, soil_temp -10~45) 자동 확인.
-  모델 성능엔 관여 안 하고 파이프라인 버그·극단 외삽(과거 실패 실험에서 나온 음수EC 같은 사고)만 잡는 순수 안전장치.
-- ✅ **4-fold 교차검증을 train.py에 정식 통합 (26.07.12)** — 그동안 4-fold는 대화 중 즉석 스크립트로만 돌리고
-  train.py엔 마지막 4일 단일검증만 찍혔음. `run_folds()` 함수로 정식 편입해서 `python train.py` 실행 시
-  4-fold 결과(더 신뢰도 높음, 헤드라인)와 단일검증(참고용, 신뢰도 낮음)을 둘 다 출력하도록 수정.
-  현재 최종 피처 기준 4-fold: soil_moisture 1.1199±0.38 / soil_ec 0.3106±0.26 / soil_temp 1.0771±0.33
-  (기존 즉석 실험값과 정확히 일치, 재현성 확인). 최종 제출 모델 학습 로직 자체는 변경 없음.
+### 성능 (4-fold 교차검증, 신뢰도 높음)
+| 타깃 | 기준선(26.07.12) | 최종(26.07.13) | 개선율 |
+|---|---|---|---|
+| soil_moisture | 1.1199 | **1.0564** | -5.7% |
+| soil_ec | 0.3106 | **0.3065** | -1.3% |
+| soil_temp | 1.0771 | **0.7636** | **-29.1%** |
+
+EC test 예측 고유값: 104개 → **1,567개** (최다값 비중 39% → 1.8%), 뭉침 실질적 해소.
+
+### 채택된 주요 변경사항 (train.py + inference.py)
+- ✅ **lag 피처** (1h/3h/6h/12h/1일 전 X변수값) — soil_temp 열관성 포착, -21% 핵심 개선
+- ✅ **rolling mean/std 피처** (1일/2일 평균 + 변동성) — EC 체제 포착, moisture/ec 소폭 개선
+- ✅ **accel 피처** (circ_fan, vent1 1일-2일 rolling 차이) — 환기 추세 방향
+- ✅ **hour sin/cos 인코딩** — 시간 주기 연속성
+- ✅ **humidity 3일 rolling** — 수분 레벨 장기 포착
+- ✅ **타깃별 피처 분리** — moisture(lag 제외), temp(rolling mean 제외), ec(day_num 포함)
+- ✅ **0-importance 피처 제거** — 4-fold 전체에서 한 번도 안 쓰인 컬럼 타깃별 제거
+- ✅ **soil_ec min_child_samples=50** — 보수적 분기, -0.4%
+- ✅ **soil_ec lr=0.03, n_est=2000** — 세밀 탐색
+- ✅ **soil_temp Ridge+LightGBM 앙상블** (w=0.40) — -8.4% 추가 개선, BlendModel 클래스
+- ✅ **inference.py cold start 수정** — train+test 연결 후 피처 계산, test 1일 lag NaN 38.6%→0%
+
+### 폐기 확정 (재시도 금지)
+- ❌ 선형+LightGBM 하이브리드(EC) — 음수EC + val 악화
+- ❌ num_leaves 조정 / subsample 광역 튜닝 — 전체 악화
+- ❌ soil_moisture Ridge 블렌딩 — fold3 RMSE 2.9 폭발(계단구조 불가)
+- ❌ soil_ec Ridge 블렌딩 — +8~77% 전체 악화
+- ❌ 다분광 이미지 6가지 방식 — 파장 713~920nm 한계(EC/수분 직접 측정 불가)
+- ❌ 멀티시드 앙상블 — early stopping으로 수렴점 동일
+- ❌ EC 로그 변환 — +3.3% 악화
+- ❌ HistGBT 앙상블 — 단독 7~13% 열세, 블렌딩 전부 악화
+- ❌ cycle_phase(14일), fan_day_interact, fan_cumoff 피처 — 전부 악화
+- ❌ EC day_num 제거 — +70.4% 급격 악화
+
+### 현재 상태
+- ✅ `python3 train.py` → 정상 (4-fold 출력 + model.pkl 저장)
+- ✅ `python3 inference.py` → 정상 (3456행, 검증 통과, cold start 수정 포함)
+- 🔲 input/dataset/ 경로 전환 (Docker 제출 직전 필요)
+- 🔲 Docker 재현 검증 (실제 모델 기준)
+
+---
 
 ---
 

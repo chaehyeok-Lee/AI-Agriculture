@@ -1,19 +1,149 @@
-# 온라인테스트1 제출 샘플 (재현 검증용)
-
-hello world
+# 온라인테스트1 — 생육환경 예측 (26.07.13 최종)
 
 ```bash
+# 실행 순서
+python3 train.py       # 모델 학습 → model/model.pkl
+python3 inference.py   # 예측    → output/submission.csv
+
+# Docker 제출 (경로 전환 필요 — PLAN.md 참조)
 docker build -t submission .
 docker run --rm -v "$PWD/input:/app/input" -v "$PWD/output:/app/output" \
   submission sh -c "python train.py && python inference.py"
 ```
-생육 환경 예측
 
-참가 팀은 테스트 구간의 soil_moisture, soil_ec, soil_temp 값을 예측한다. 제출 파일은 time 컬럼 기준으로 정답 행과 매칭한다.
+## 과제 개요
+테스트 구간(DAT135~146, 12일)의 soil_moisture / soil_ec / soil_temp 예측.
+제출 파일은 time 컬럼 기준으로 정답 행과 매칭. 평가: 항목별 raw RMSE → 순위 점수 변환.
 
-평가 항목은 배지수분 RMSE, 배지 EC RMSE, 배지온도 RMSE이다. 온라인1 점수는 각 항목 raw RMSE를 순위 점수로 변환해 산출한다.
+---
 
-주의사항 이 작업할거고 너가 앞으로 전부 임의로 코드는 수정하지 마 그냥 나한테 허락만 받거나 코드를 내가 캡쳐할수 있게 해
+## 최종 성능 (26.07.13)
+
+| 타깃 | 기준선 4-fold | 최종 4-fold | 개선율 | 비고 |
+|---|---|---|---|---|
+| soil_moisture | 1.1199 | **1.0564** | -5.7% | rolling/accel 피처 |
+| soil_ec | 0.3106 | **0.3065** | -1.3% | 고유값 104→1,567개 |
+| soil_temp | 1.0771 | **0.7636** | **-29.1%** | lag + Ridge 앙상블 |
+
+---
+
+## 모델 구조 요약
+
+### 피처 파이프라인 (`train.py` → `inference.py` 동일하게 적용)
+```
+build_features(raw_X)           # preprocess.py: 1분→5분 집계, clip, day_num/hour
+→ add_trend_features()          # X변수 1일 전 대비 변화량 (7개 컬럼)
+→ add_lag_features()            # 1h/3h/6h/12h/1일 전 값 (5컬럼 × 5lag = 25개)
+→ add_rolling_features()        # 1일/2일 rolling mean+std + accel + humidity 3일
+→ add_cyclic_features()         # hour sin/cos 인코딩
+```
+
+**⚠️ inference.py 주의**: train_X + test_X를 연결해서 피처 계산 후 test 부분만 슬라이싱.
+단독 처리하면 test 첫 1일 lag 피처 38.6%가 NaN — cold start 버그.
+
+### 타깃별 모델
+| 타깃 | 모델 | 특이사항 |
+|---|---|---|
+| soil_moisture | LightGBM (n_est=1000, lr=0.05) | lag 피처 전부 제외 (day_num 중심) |
+| soil_ec | LightGBM (n_est=2000, lr=0.03, min_child=50) | 외삽 구조적 한계 |
+| soil_temp | **Ridge(α=0.1) × 0.40 + LightGBM × 0.60** | BlendModel 클래스 |
+
+### 타깃별 피처 제외 규칙 (`DROP_COLS_PER_TARGET`)
+- **soil_moisture**: lag 피처 25개 전부 제외 + 0-importance 16개
+- **soil_ec**: 0-importance 41개만 제거 (day_num/lag/rolling 전부 유지)
+- **soil_temp**: day_num 제외 + rolling mean 8개 제외 + 0-importance 19개
+
+---
+
+## 피처별 채택 근거 및 효과
+
+### ✅ add_trend_features (채택)
+**이유**: EC/moisture가 환기 스케줄 변화에 계단형 반응. "EC 추세"는 test에 y값 없어 누수 함정 → X변수 변화량으로 대체.  
+**효과**: moisture -4.2%, temp -5.5%, ec 무변화(해롭지 않음).
+
+### ✅ add_lag_features (채택, soil_temp 핵심)
+**이유**: 토양이 환경 변화에 즉각 반응하지 않음. temperature_mean_lag12/36/72가 배지온도의 "열관성" 포착. 배지온도 = 내부온도에서 열이 전달되는 데 수 시간 걸림.  
+**효과**: soil_temp -21.2% (가장 큰 단일 개선). soil_moisture는 오히려 +2.2% 악화 → LAG_FEATURE_NAMES로 제외.  
+**lag steps**: 12(1h) / 36(3h) / 72(6h) / 144(12h) / 288(1일) — 5분 격자 기준.
+
+### ✅ add_rolling_features (채택)
+**이유**: lag("딱 한 시점")와 달리 rolling은 "최근 N일 평균 상태" — 순간 노이즈에 덜 민감.  
+circ_fan_mean_roll288/576으로 환기 "체제(regime)"를 안정적 포착.  
+rollstd로 팬/온도 변동성 포착 (0이면 체제 안정, 크면 전환 중).  
+accel(1일-2일 차이) = 최근 환기 추세 방향 (양수→팬 가동 증가→EC 하락 기대).  
+**효과**: circ_fan_accel로 moisture -2.0%, vent1_accel로 moisture -0.8%, rollstd로 -1.4~1.6%.  
+soil_temp는 rolling mean이 노이즈(lag와 중복) → ROLL_FEATURE_NAMES로 제외. rollstd는 포함.
+
+### ✅ add_cyclic_features (채택)
+**이유**: hour를 0~24 선형값으로 쓰면 23시→0시가 가장 먼 값. sin/cos로 원형 연속성 표현.  
+**효과**: 미미(noise), 해롭지 않아 유지.
+
+### ✅ Ridge + LightGBM 앙상블 for soil_temp (채택, BlendModel)
+**이유**: soil_temp가 temperature_mean과 선형 관계가 강해 Ridge의 선형 외삽이 유효. LightGBM은 비선형/시간대 패턴 담당.  
+**탐색**: alpha ∈ {0.1, 1.0, 10.0}, w_ridge ∈ 0.0~0.70 그리드 → alpha=0.1, w=0.40 최적.  
+**효과**: LightGBM 단독 0.8338 → **0.7636 (-8.4%)**. 모든 fold 균등 개선.  
+**구현**: BlendModel 클래스 (predict() 인터페이스 동일 → inference.py 수정 불필요).  
+Ridge NaN 처리: train column median으로 대체 후 StandardScaler.
+
+---
+
+## 폐기된 접근법 전체 (재시도 금지)
+
+### 모델/앙상블 관련
+| 방법 | 결과 | 이유 |
+|---|---|---|
+| soil_moisture Ridge 블렌딩 | fold3 RMSE 2.9 폭발 (+46%) | EC 계단구조처럼 moisture도 step 패턴 → 선형화 불가 |
+| soil_ec Ridge 블렌딩 (clip≥0) | +8~77% 악화 | EC 4개 레짐(0.4/0.55/0.7/1.7)은 선형 외삽 불가 |
+| LightGBM num_leaves=63 전체 적용 | 전체 +9~13% 악화 | 소규모 데이터(7488행)에 과대 복잡도 |
+| LightGBM subsample=0.7+colsample=0.7 | EC +9.5% | 배깅이 EC 학습 방해 |
+| 멀티시드 앙상블 (3/5/7 seeds) | 완전 동일 (0.0%) | early stopping으로 수렴점이 seed 무관 |
+| EC 로그 변환 log(EC) | EC +3.3% | 계단구조는 선형 스케일에서 더 잘 포착됨 |
+| HistGradientBoosting + LightGBM | 전체 악화 | HistGBT 단독이 7~13% 열세 |
+
+### 피처 관련
+| 방법 | 결과 | 이유 |
+|---|---|---|
+| cycle_phase (14일 주기 가설) | moisture +1.3% | 단일val만 개선 = 과적합, 4-fold 신뢰 |
+| fan_day_interact (circ_fan×day_num) | moisture +4.7% | 교호작용 피처가 noise로 작용 |
+| humidity lag만 허용 (moisture) | moisture +1.8% | lag 전부 제거가 더 좋음 |
+| VPD 프록시 (temp×humidity) | moisture +1.0% 악화 | 기존 피처와 중복 |
+| 팬 5/7일 rolling (1440/2016 steps) | EC fold3 불변 | 훈련에 팬→EC 급락 사이클 없어 학습 불가 |
+| 팬 전환 감지 (fan_transition) | EC fold3 불변 | 동일 이유 |
+| 팬 누적 OFF 기간 (fan_cumoff) | EC 중립, moisture 소폭 악화 | 동일 이유 |
+| polynomial (temp², temp×hour) | soil_temp +4% | Ridge 성분과 충돌 |
+| EC 상호작용 (humidity×co2, vent1×vent2) | EC 0.0% 중립 | 기존 피처 이미 포착 |
+
+### 다분광 이미지 (전부 폐기)
+**근본 한계**: 카메라 파장 713~920nm (적색에지~근적외선만). 가시광(400~700nm)이나 단파적외선(SWIR, 1200nm+) 없음.
+
+| 방법 | 결과 | 이유 |
+|---|---|---|
+| 원본 밴드 평균값 | EC/moisture 무변화, temp 악화 | 조명 세기 영향, 배경 미분리 |
+| 하위 15% 마스킹 후 평균 | EC/moisture 무변화, temp 악화 | 기준판(밝은 비식물) 미제거 |
+| 밴드 비율(적색에지/NIR) | 동일 | 정보량 동일, 스케일만 달라짐 |
+| NDRE/CRE/Stress 식생지수 | EC 0.0% 중립 | day_num과 공선형(계절 추세) |
+| Otsu 이진화 캐노피 커버 | EC 0.0% 중립 | day_num과 공선형 |
+| 캐노피 밀도 proxy (raw/masked 비율) | moisture/temp 악화 | 잡음 추가 |
+
+**알 수 있는 것**: 엽록소 함량(NDRE), 엽면적지수(LAI), 생육 단계. 생육 모니터링 용도에 적합.  
+**알 수 없는 것**: EC/염류 스트레스(가시광·SWIR 필요), 수분 스트레스(970nm+).
+
+---
+
+## EC 구조적 한계 (핵심)
+
+EC 4-fold 분포: **[0.53, 0.08, 0.60, 0.02]** — mean 0.3065.
+
+| fold | val 구간 | EC 패턴 | RMSE | 개선 가능성 |
+|---|---|---|---|---|
+| 1 | 118~122 | **0.55→1.7 급등** (day121) | 0.531 | ❌ 없음 — 시비 결정, X변수 신호 없음 |
+| 2 | 122~126 | 1.7 안정 | 0.078 | 이미 우수 |
+| 3 | 126~130 | **1.7→0.4 급락** (day129 팬ON) | 0.595 | ❌ 없음 — 훈련에 "팬ON→EC급락" 사이클 없음 |
+| 4 | 130~134 | 0.4 안정 | 0.022 | 이미 우수 |
+
+**4-fold mean 0.31은 과대추정**: test(DAT135~146)가 day134의 EC~0.4, 팬ON 상태에서 이어지는 안정 레짐이면 실제 test RMSE ≈ fold4 수준(0.02~0.08).
+
+---
 
 작업 요약 — 센서 EDA → 다분광 EDA → 전처리 파이프라인 → Docker/git 설정, 전체 흐름
 데이터 구조 — env(1분/5분) + ms(다분광 이미지) 구조 요약
