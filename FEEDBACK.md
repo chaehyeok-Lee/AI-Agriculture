@@ -521,3 +521,227 @@ co2_supply/fcu_fan/fogging)은 심화 피처 없이 raw 집계값(mean/max/min/s
 이미 트리가 필요한 정보를 충분히 뽑아내고 있는 것으로 판단 — 추가 lag/rolling은 대부분
 노이즈로 작용. 원본 컬럼 중 실제로 처리 방식 자체가 잘못돼 있던 건 wind_direction뿐.
 
+
+
+---
+
+# 셀프 피드백 루프 6 - 26.07.14 (circ_fan 진단 + submission 개선)
+
+## 진단 결과
+
+- circ_fan_mean_roll576: 전체 트리(113개) 최초 분기 + gain 압도적 1위(28,049)
+- 위상 지연 문제: roll576은 현재 상태 아닌 1-2일 전 상태 반영
+- day_num: 100% OOD (test 135-146 모두 train 범위 109-134 밖)
+- 날씨: 3일 주기로 2가지 패턴(DAT116, DAT127) 반복
+
+## 실험: circ_fan_mean _ZERO_EC 복원 + 이진 피처 추가
+
+변경: (1) _ZERO_EC에서 circ_fan_mean 제거, (2) circ_fan_on_binary + circ_fan_regime 추가
+
+4-fold CV: moisture=1.0535 / ec=0.3066 / temp=0.7583 (기준선 대비 무변화)
+
+submission 변화:
+- EC 고유값: 104개(38.8%) -> 1,410개(2.7%)
+- EC 패턴: 팬OFF(138-143일) 0.47->1.67 상승, 팬ON(144+) 0.48 하락
+- 물리적으로 올바른 패턴 포착 성공
+
+판단: 유지 (4-fold 무변화 + submission 13.6배 다양화)
+
+---
+
+## 루프 6-B: temperature_mean_roll288 for soil_temp (selective rolling)
+
+변경: DROP_COLS_PER_TARGET["soil_temp"]에서 temperature_mean_roll288/576 제외
+- 기존: ROLL_FEATURE_NAMES 전체 드롭 (circ_fan/vent1/temp/humidity 모두)
+- 변경: "temperature_mean" 포함된 rolling만 유지 (열관성 신호)
+
+4-fold CV: moisture=1.0535 / ec=0.3066 / temp=**0.7084** (-6.6%)
+- fold별: [0.61, 0.364, 0.782, 1.077] ← 전 fold 개선
+
+판단: 유지. temperature_mean_roll288 (24시간 평균)은 temperature_mean_lag36 (3시간 스냅샷)과
+보완적으로 작동 — 열관성의 다른 시간 스케일 포착.
+
+---
+
+## 루프 6-C: EC day_num 제거 재시도 (circ_fan 수정 후 재검증)
+
+변경 시도: soil_ec DROP에 day_num 추가
+
+4-fold CV: ec=0.5131 (+67.4% 악화, fold2: 0.078→0.991!)
+판단: circ_fan 수정 후에도 day_num이 EC에 필수 (EC 레짐 전환 타이밍 암기). 즉시 롤백.
+
+---
+
+## 루프 6-D: thermal_curtain + solar_radiation trend1d → EC 전용
+
+변경: TREND_SRC_COLS에 thermal_curtain_mean, solar_radiation_mean 추가
+     + _ZERO_MOISTURE/_ZERO_TEMP에 두 피처 추가 (EC 전용 격리)
+
+4-fold CV: moisture=1.0535 / ec=**0.3038** (-0.9%) / temp=0.7084
+- EC fold3: 0.5951→0.5828 (-2.1%)
+- submission EC 고유값: 1,410→1,493
+
+판단: 유지. 온실 관리 신호(커튼 작동, 일사량 변화)가 EC 변화와 직접 연결.
+
+---
+
+## 루프 6-E: ROLL_WINDOWS에 144(12시간) 추가 + 모델별 격리
+
+변경: ROLL_WINDOWS = [144, 288, 576]
+      temperature_mean_roll144 → temp 유지, roll144 전체 → moisture 제외
+
+4-fold CV: moisture=1.0535 / ec=0.3038 / temp=**0.6716** (-5.2%)
+- temp fold별: [0.624, 0.343, 0.729, 0.991] ← fold4가 1.077→0.991 (-8%)
+- submission EC 고유값: 1,493→3,061 (2배!)
+
+판단: 유지. 12시간 온도 rolling이 24시간/48시간 rolling과 보완적으로 온도 모델 개선.
+
+---
+
+## 루프 6-F: temperature_outside_mean lag → EC 전용
+
+변경: LAG_SRC_COLS에 temperature_outside_mean 추가
+      temperature_outside_mean_lag* → _ZERO_TEMP (EC 전용 격리)
+
+4-fold CV: moisture=1.0535 / ec=**0.3033** (-0.2%) / temp=0.6716
+- submission EC 고유값: 3,061→3,250
+
+판단: 유지. 외기온도 지연값이 EC(EC는 관수/증산과 연동) 소폭 개선.
+
+---
+
+## 루프 6 누적 결과
+
+| 타깃 | 루프5 기준선 | 현재 | 개선율 |
+|---|---|---|---|
+| soil_moisture | 1.0534 | **1.0535** | ±0% (구조적 한계: 관리 이벤트) |
+| soil_ec | 0.3065 | **0.3033** | **-1.0%** |
+| soil_temp | 0.7581 | **0.6716** | **-11.4%** |
+| EC 고유값 | 1,567 | **3,250** | **+107%** |
+
+실패 실험 목록 (루프6):
+- fcu_pump rolling: moisture +19% 악화 (관수 이력 롤링은 노이즈)
+- CO2 rolling: moisture +3.5%, temp +2.3% 악화
+- humidity rolling for temp: 소폭 악화
+- 3-day rolling (864 window): 전체 소폭 악화
+- min_child_samples for moisture: 10/30/50 모두 악화
+- EC day_num 제거: +67% 악화 (circ_fan 수정 후에도 동일)
+- trend clip (OOD 방지): 트리 모델에서 효과 없음 (경계 리프에서 자동 처리됨)
+
+---
+
+# 셀프 피드백 루프 7 — 26.07.14 (디스크 복구 후 LightGBM 하이퍼파라미터 탐색)
+
+## 기준선 (루프 시작 시점 — 루프6 최종 + 이전 세션 wind 개선 포함)
+| 타깃 | 4-fold mean |
+|---|---|
+| soil_moisture | 1.0535 |
+| soil_ec | 0.3033 |
+| soil_temp | 0.6232 |
+
+(이전 세션에서 wind_speed_outside lags: -1.3%, wind rolling(roll144/288): -4.8%, lag576 for temp: -0.7%, W_RIDGE=0.30: -0.5%가 적용된 상태)
+
+---
+
+## [피처 실험] 실패 실험 목록
+
+| 실험 | 결과 |
+|---|---|
+| fcu_fan_mean lags → temp | +0.24% 악화 |
+| humidity_outside_mean lags → temp | +7.1% 악화 |
+| solar_radiation rolling(roll144/288) → temp | +2.9% 악화 |
+| vent1 rolling 유지 → temp | +8.4% 악화 |
+| co2_mean lags 제거 → temp | +0.5% 악화 |
+| circ_fan_mean lags 제거 → temp | +0.3% 악화 |
+| temperature_outside lag288 재시도 → temp | +4.1% 악화 |
+| temperature_mean_roll864 → temp | +4.7% 악화 |
+
+---
+
+## [하이퍼파라미터 탐색] soil_temp — 핵심 성과
+
+### A. num_leaves=8 채택 (-3.1%)
+
+**실험**: num_leaves=31(기본) → 15 → 10 → 8 → 6 순차 탐색
+**결과**:
+| num_leaves | soil_temp CV |
+|---|---|
+| 31 (기본) | 0.6232 |
+| 15 | 0.6039 |
+| 10 | 0.5914 |
+| 8 | **0.5826** |
+| 6 | 0.5899 (악화) |
+
+**채택**: num_leaves=8. fold4(0.9203→0.8676) 대폭 개선 — 리프 수 제한이 fold가 짧을수록 효과적.
+
+---
+
+### B. feature_fraction=0.8 채택 (-2.1%)
+
+**실험**: 0.7 / 0.8 / 0.9 탐색
+**결과**:
+| feature_fraction | soil_temp CV |
+|---|---|
+| 0.7 | 0.5790 |
+| 0.8 | **0.5701** |
+| 0.9 | 0.5777 |
+
+**채택**: 0.8. 트리별 피처 무작위 서브샘플링이 토양온도 예측의 다중공선성 노이즈 억제.
+
+---
+
+### C. reg_lambda=3.0 채택 (-1.6%)
+
+**실험**: 1.0 → 2.0 → 3.0 → 4.0 → 5.0 탐색
+**결과**:
+| reg_lambda | soil_temp CV |
+|---|---|
+| 0 (기본) | 0.5701 |
+| 1.0 | 0.5663 |
+| 2.0 | 0.5624 |
+| 3.0 | **0.5588** |
+| 4.0 | 0.5654 |
+| 5.0 | 0.5710 |
+
+**채택**: 3.0. L2 정규화로 리프 예측값 축소 → fold4 고분산 구간 안정화.
+
+---
+
+### D. 실패한 하이퍼파라미터 (num_leaves=8 + feature_fraction=0.8 + reg_lambda=3.0 상태에서)
+
+| 실험 | 결과 |
+|---|---|
+| subsample=0.8 | +1.0% 악화 |
+| min_child_samples=50 | +3.8% 악화 |
+| reg_alpha=0.1 | +0.5% 악화 |
+| max_bin=63 | +2.2% 악화 |
+| learning_rate=0.03 | +2.7% 악화 |
+| learning_rate=0.08 | +5.4% 악화 |
+| W_RIDGE=0.20 | +1.5% 악화 |
+| num_leaves=15 for moisture | +2.9% 악화 |
+| feature_fraction=0.8 for moisture | +10.9% 악화 |
+| reg_lambda=1.0 for moisture | +2.0% 악화 |
+| num_leaves=15 for EC | n_estimators 85↓, +0.6% 악화 |
+| feature_fraction=0.8 for EC | n_estimators 264↓, +3.6% 악화 |
+| reg_lambda=1.0 for EC | n_estimators 173↓, +0.4% 악화 |
+| EC min_child_samples=30/100 | n_estimators 급감, 악화 |
+
+---
+
+## 루프 7 누적 결과
+
+| 타깃 | 루프6 기준선 | 현재 | 개선율 |
+|---|---|---|---|
+| soil_moisture | 1.0535 | **1.0535** | ±0% |
+| soil_ec | 0.3033 | **0.3033** | ±0% |
+| soil_temp | 0.6232 | **0.5588** | **-10.3%** |
+
+**soil_temp 전 세션 누적**: 1.0771(최초) → 0.5588 현재 = **-48.1%**
+
+**핵심 발견**: soil_temp는 `num_leaves=8, feature_fraction=0.8, reg_lambda=3.0` 조합으로
+fold4(짧은 학습 구간)의 과적합이 대폭 억제됨. EC/moisture에는 모두 역효과 — 타깃별
+모델 복잡도 최적 지점이 전혀 다름 확인.
+
+**EC 고유값**: 3,227개 (정상, 팬OFF→팬ON→팬OFF 물리적 EC 패턴 유지)
+
+
