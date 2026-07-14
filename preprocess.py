@@ -5,6 +5,7 @@
 - train.py / inference.py (Docker 실행용): input/dataset/... (채점 시 실제 마운트되는 경로)
   input/dataset/는 대회 측이 준 샘플(1일치)이라 전체 검증엔 못 씀 — 구조 확인용
 """
+import numpy as np
 import pandas as pd
 
 
@@ -107,6 +108,48 @@ def build_features(raw_df, ms_matched_path=None):
         feat_5min = merge_image_features(feat_5min, ms_matched_path)
 
     return feat_5min
+
+
+def compute_ec_high_confidence(raw_df):
+    """"고EC 관리이벤트(시비 농도 상향)" 소프트 신뢰도[0,1]를 일 단위로 계산.
+
+    train(DAT121~128, soil_ec ~1.7)에서 관측된 패턴: 보온커튼(thermal_curtain)과
+    차광커튼(shading_curtain)이 하루 동안 거의 완전히 동기화되어 움직이고(agreement>=98%,
+    둘 다 완전개방/완전폐쇄 지점을 하루 중 한 번씩은 지남) AND 순환팬(circ_fan)이 대체로
+    꺼져있으면(일평균<15, raw 0~201 스케일) 고EC 레짐일 가능성이 높다고 판단.
+
+    ⚠️ 이 규칙은 train 전체에서 단 1번(121~128일)만 관측된 패턴이라 100% 확신할 근거는
+    아님 — test(135~146일)에서 동일 신호가 DAT141~143에 재현되는 것은 확인했으나(circ_fan
+    거의 OFF + 커튼 완전동기), 외부 날씨가 test 구간 내 게이트ON/OFF 사이에 전혀 차이가
+    없어(3일 주기 반복 템플릿) 실제 시비 결정과 무관한 우연일 가능성도 배제 못 함 —
+    그래서 0/1 하드 분류가 아니라 연속값 신뢰도로 리턴, 소프트 블렌드로만 사용할 것.
+    (자세한 근거: FEEDBACK.md 루프 9)
+
+    Returns: {day_num(int): confidence(float, 0~1)} 딕셔너리.
+    circ_fan은 map_actuator_onoff로 0/1 이진화되기 *전* raw 스케일(0~201)을 써야
+    임계값(<15)이 의미가 있음 — 이 함수는 raw_df를 직접 받아 자체적으로 dt 인덱스만 만들고
+    이진화는 하지 않는다.
+    """
+    df = make_dt_index(raw_df.copy())
+    df["day_num"] = df.index // pd.Timedelta("1D")
+    conf = {}
+    for d, g in df.groupby("day_num"):
+        th, sh, fan = g["thermal_curtain"], g["shading_curtain"], g["circ_fan"]
+        curtain_both_extremes = ((th >= 99) & (sh >= 99)).any() and ((th <= 1) & (sh <= 1)).any()
+        agreement = (th.sub(sh).abs() <= 0.5).mean() >= 0.98
+        gate = curtain_both_extremes and agreement
+        fan_conf = float(np.clip((20 - fan.mean()) / 15, 0, 1))
+        conf[int(d)] = fan_conf if gate else 0.0
+    return conf
+
+
+def add_ec_high_confidence(feat_df, raw_df):
+    """build_features() 결과(5분 그리드)에 ec_high_confidence 컬럼을 day_num 매핑으로 추가.
+    soil_ec 예측에서만 소프트 블렌드 용도로 사용 — 다른 타깃은 이 컬럼을 제외하고 학습한다."""
+    conf = compute_ec_high_confidence(raw_df)
+    feat_df = feat_df.copy()
+    feat_df["ec_high_confidence"] = feat_df["day_num"].map(conf).fillna(0.0)
+    return feat_df
 
 
 def load_target(y_path):

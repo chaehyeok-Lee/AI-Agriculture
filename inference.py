@@ -8,11 +8,11 @@ import pickle
 
 import pandas as pd
 
-from preprocess import build_features
+from preprocess import build_features, add_ec_high_confidence
 from train import (
     DROP_COLS_PER_TARGET, TARGET_COLS,
     add_trend_features, add_lag_features, add_rolling_features, add_cyclic_features,
-    BlendModel,  # noqa: F401 — pickle이 역직렬화 시 참조
+    BlendModel, ECBlendModel,  # noqa: F401 — pickle이 역직렬화 시 참조
 )
 
 COLUMNS = ["time", "soil_moisture", "soil_ec", "soil_temp"]
@@ -61,6 +61,7 @@ def main():
     combined_feat = add_lag_features(combined_feat)
     combined_feat = add_rolling_features(combined_feat)
     combined_feat = add_cyclic_features(combined_feat)
+    combined_feat = add_ec_high_confidence(combined_feat, combined_raw)
 
     # test 구간(DAT135~)만 잘라냄 — train 부분은 컨텍스트 공급 역할만 하고 버림
     test_feat = combined_feat[combined_feat.index >= pd.Timedelta(days=135)]

@@ -41,7 +41,26 @@ Docker 제출용으로 바꿀 때는 input/dataset/...로 교체 필요 (PLAN.md
 
 [EC 구조적 한계]
   fold 분포 [0.53, 0.08, 0.58, 0.02] — fold 1(day121 관리 이벤트)과 fold 3(day129 팬
-  재가동)이 고RMSE. EC 4-fold 0.30은 과대추정 — test(135~146) 실제 ≈ 0.02~0.08 예상.
+  재가동)이 고RMSE. fold 1은 X변수로 예측 불가능한 시비 결정. fold 3은 훈련 데이터
+  (109~126)에 "팬 재가동 → EC 급락" 사이클이 없어 어떤 모델도 학습 불가.
+  EC 4-fold 0.30은 과대추정 — test(135~146) 실제 ≈ 0.02~0.08 예상.
+
+[soil_moisture 피처 재현성 재검증 — 26.07.13 루프6, FEEDBACK.md 상세]
+  기존 "-5.7%(1.1199→1.0564)" 개선은 원래 cutoff 세트([118,122,126,130]) 딱 하나로만
+  검증됐던 것. cutoff을 ±1~2일 옮긴 4세트로 재확인하니 "4-fold 평균" 기준 재현 안 됨
+  (trend/rolling/cyclic을 각각 baseline에 단독으로 추가했을 때 4세트 전부 0/4 통과 —
+  기존 개선폭이 기준선 fold 표준오차보다 작아 노이즈와 통계적으로 구분 불가).
+
+  "최대 학습데이터 fold"(실전 배포와 가장 비슷한 조건)만 따로 보면 trend는 4/4·rolling은
+  3/4 일관되게 개선하는데, cyclic만 4/4 전부 악화 — 그래서 처음엔 "cyclic만 soil_moisture
+  에서 제외"로 결론지었었음. 그런데 실제로 빼서(leave-one-out) 재검증하니 정반대 결과가
+  나옴: trend+rolling 조합에서 cyclic을 빼면 4개 cutoff 세트 **전부**에서 오히려 악화
+  (예: set0 1.0534→1.0971). 단독 추가 효과와 이미 있는 조합에서 빼는 효과가 다르게
+  나온 것 — cyclic이 trend/rolling과 상호작용한다는 뜻. → **결론: 코드 변경 없음(전부
+  유지)**. 다만 기존 "-5.7%" 문서화는 신뢰 과잉이었음을 인정 — 단일 cutoff 세트의 평균
+  개선폭 자체는 노이즈와 통계적으로 구분 안 되지만, "이 조합을 빼면 더 나빠진다"는
+  leave-one-out 신호는 4/4로 강함. 즉 "확실히 더 좋다"는 아니어도 "지금 조합을 건드리면
+  더 나빠진다"는 충분히 검증됨 → 현상 유지가 최선의 선택.
 ================================================================================
 """
 import os
@@ -53,13 +72,19 @@ import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
-from preprocess import build_features, load_target
+from preprocess import build_features, load_target, add_ec_high_confidence
 
 RANDOM_STATE = 42
 TARGET_COLS = ["soil_moisture", "soil_ec", "soil_temp"]
 
 # X변수(구동기/날씨) 추세 피처
 # thermal_curtain/solar_radiation → EC 전용(-0.9%), moisture/temp는 _ZERO로 제외
+#
+# ⚠️ soil_moisture 재현성 재검증(26.07.13 루프6, FEEDBACK.md): cutoff을 ±1~2일 옮긴 4세트로
+# 재확인한 결과, "4-fold 평균" 기준으로는 재현 안 됨(4세트 중 0개 통과 — 노이즈와 통계적으로
+# 구분 불가). 다만 "최대 학습데이터 fold"(실전 배포와 가장 비슷한 조건)만 따로 보면 4세트
+# 전부에서 일관되게 개선(+0.02~+0.11) — 학습 데이터가 많을수록 안정적으로 도움되는 "안정구간
+# 한정" 피처로 재분류. 초기 소규모 학습창(폴드1~3류)에서의 개선/악화는 신뢰 불가.
 TREND_SRC_COLS = [
     "circ_fan_mean", "greenhouse_roof_vent1_mean", "greenhouse_roof_vent2_mean",
     "temperature_outside_mean", "humidity_outside_mean", "humidity_mean", "co2_mean",
@@ -82,6 +107,10 @@ MOISTURE_LAG_EXCLUDE = [f"{col}_lag{lag}" for col in LAG_SRC_COLS for lag in LAG
 
 # rolling window 피처: circ_fan 12h/1일/2일 평균으로 환기 "체제(regime)" 포착
 # soil_temp는 temperature_mean rolling만 유지(열관성), 나머지는 _ZERO로 제외
+#
+# ⚠️ soil_moisture 재현성 재검증(26.07.13 루프6): trend와 동일한 패턴 — 4-fold 평균 기준
+# 재현 안 됨(0/4), 최대 학습데이터 fold 기준으로는 4세트 중 3개에서 개선(+0.02~+0.50, set2만
+# 소폭 악화 -0.07) → "안정구간 한정" 피처로 재분류, trend보다 재현성이 살짝 약함.
 ROLL_SRC_COLS = [
     "circ_fan_mean", "greenhouse_roof_vent1_mean",
     "temperature_mean", "humidity_mean",
@@ -99,6 +128,7 @@ _ZERO_MOISTURE = [
     "circ_fan_mean_roll144", "greenhouse_roof_vent1_mean_roll144",
     "temperature_mean_roll144", "humidity_mean_roll144",
     "wind_speed_outside_roll144", "wind_speed_outside_roll288",
+    "ec_high_confidence",
 ]
 _ZERO_EC = [
     "circ_fan_last", "circ_fan_max", "circ_fan_mean", "circ_fan_mean_lag12",
@@ -136,6 +166,7 @@ _ZERO_TEMP = [
     "temperature_outside_mean_lag12", "temperature_outside_mean_lag36",
     "temperature_outside_mean_lag72", "temperature_outside_mean_lag144",
     "temperature_outside_mean_lag288", "temperature_outside_mean_lag576",
+    "ec_high_confidence",
 ]
 
 DROP_COLS_PER_TARGET = {
@@ -195,7 +226,13 @@ def add_domain_features(feat_df):
 
 
 def add_cyclic_features(feat_df):
-    """hour/wind_direction을 sin/cos로 바꿔 원형 연속성을 표현."""
+    """hour/wind_direction을 sin/cos로 바꿔 원형 연속성을 표현.
+
+    ⚠️ soil_moisture 재현성 재검증(26.07.13 루프6, 모듈 docstring 상단 참고): 이 함수를
+    baseline에 단독으로 추가하면 재현성이 약했지만(cutoff 4세트 재현 안 됨), trend+rolling이
+    이미 있는 상태에서 이 함수만 빼보면(leave-one-out) 4세트 전부 악화 — 상호작용 효과로
+    현재 조합에서는 유지가 최선. soil_moisture DROP_COLS_PER_TARGET에 넣지 않음(그대로 유지).
+    """
     feat_df = feat_df.copy()
     if "hour" in feat_df.columns:
         feat_df["hour_sin"] = np.sin(2 * np.pi * feat_df["hour"] / 24)
@@ -243,6 +280,36 @@ class BlendModel:
         return self.w_ridge * pred_ridge + (1 - self.w_ridge) * pred_lgbm
 
 
+class ECBlendModel:
+    """LightGBM 예측과 "고EC 레짐 override"를 ec_high_confidence 컬럼(신뢰도, 0~1)으로
+    소프트 블렌드. 신뢰도가 1이면 완전히 override(고EC 레짐 평균값), 0이면 LightGBM 그대로,
+    그 사이는 가중평균.
+
+    수학적 근거: 실제값이 두 레벨(고EC/평시) 중 하나일 확률분포를 따른다고 볼 때,
+    오차제곱합을 최소화하는 단일 예측값은 정확히 p*고EC값 + (1-p)*평시예측값 형태
+    (p=고EC일 확률) — "확신도만큼만 반영"은 임의의 절충이 아니라 불확실성 하에서
+    RMSE를 최소화하는 이론적 최적해. p=1(완전확신)이면 하드 오버라이드, p=0이면
+    LightGBM 단독과 동일해 두 극단을 포함하는 일반형이다.
+
+    ⚠️ ec_high_confidence 게이트 규칙 자체가 train에서 단 1번(121~128일)만 관측된
+    패턴이라 p를 100% 신뢰할 근거는 아님 — 그래서 하드 분류(0/1)가 아닌 연속 신뢰도로
+    블렌드해 오탐 시 피해를 제한한다 (자세한 근거: FEEDBACK.md 루프9).
+
+    .predict() 인터페이스가 LGBMRegressor와 동일해 inference.py 구조 변경 불필요 —
+    단, 입력 X에는 "ec_high_confidence" 컬럼이 반드시 포함되어야 한다.
+    """
+
+    def __init__(self, lgbm_model, lgbm_cols, high_regime_value):
+        self.lgbm = lgbm_model
+        self.lgbm_cols = lgbm_cols
+        self.high_regime_value = high_regime_value
+
+    def predict(self, X):
+        pred_lgbm = self.lgbm.predict(X[self.lgbm_cols])
+        conf = X["ec_high_confidence"].to_numpy()
+        return conf * self.high_regime_value + (1 - conf) * pred_lgbm
+
+
 def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
     """4-fold 시계열 교차검증 실행."""
     results = {c: [] for c in TARGET_COLS}
@@ -254,11 +321,14 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
         val_feat, val_y = feat_df[val_mask], target_y[val_mask]
         for col in TARGET_COLS:
             cols = [c for c in tr_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
+            # soil_ec: ec_high_confidence는 소프트 블렌드 레이어에서만 쓰고, 트리 자체의
+            # 분기 피처로는 안 씀(레짐 override 신뢰도를 트리가 직접 학습하면 의미가 섞임).
+            fit_cols = [c for c in cols if c != "ec_high_confidence"] if col == "soil_ec" else cols
             m = lgb.LGBMRegressor(**MODEL_PARAMS[col], random_state=RANDOM_STATE, verbosity=-1)
-            m.fit(tr_feat[cols], tr_y[col], eval_set=[(val_feat[cols], val_y[col])],
+            m.fit(tr_feat[fit_cols], tr_y[col], eval_set=[(val_feat[fit_cols], val_y[col])],
                   callbacks=[lgb.early_stopping(100, verbose=False)])
             fold_iters[col].append(m.best_iteration_)
-            pred_lgbm = m.predict(val_feat[cols])
+            pred_lgbm = m.predict(val_feat[fit_cols])
 
             if col == "soil_temp":
                 col_med = tr_feat[cols].median()
@@ -269,6 +339,14 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
                 ridge.fit(tr_scaled, tr_y[col])
                 pred_ridge = ridge.predict(val_scaled)
                 pred = TEMP_BLEND_W_RIDGE * pred_ridge + (1 - TEMP_BLEND_W_RIDGE) * pred_lgbm
+            elif col == "soil_ec":
+                # 고EC 레짐 override 값은 이 fold의 학습구간(tr_feat/tr_y)만으로 계산 —
+                # 미래(val) 정보 누수 없음. 신뢰도(confidence)는 val 당일 X값에서만 계산되므로
+                # 마찬가지로 누수 없음(y를 몰라도 알 수 있는 값).
+                high_mask = tr_feat["ec_high_confidence"] >= 0.99
+                high_regime_value = tr_y.loc[high_mask, col].mean() if high_mask.any() else tr_y[col].mean()
+                conf = val_feat["ec_high_confidence"].to_numpy()
+                pred = conf * high_regime_value + (1 - conf) * pred_lgbm
             else:
                 pred = pred_lgbm
 
@@ -277,11 +355,13 @@ def run_folds(feat_df, target_y, cutoffs=FOLD_CUTOFFS):
 
 
 def main():
-    train_feat = build_features(pd.read_csv("dataset/train/env/train_X.csv"))
+    train_raw = pd.read_csv("dataset/train/env/train_X.csv")
+    train_feat = build_features(train_raw)
     train_feat = add_trend_features(train_feat)
     train_feat = add_lag_features(train_feat)
     train_feat = add_rolling_features(train_feat)
     train_feat = add_cyclic_features(train_feat)
+    train_feat = add_ec_high_confidence(train_feat, train_raw)
     train_y = load_target("dataset/train/env/train_y.csv")
 
     print("=== 4-fold 시계열 교차검증 (더 신뢰할 수 있는 지표) ===")
@@ -301,11 +381,12 @@ def main():
     models = {}
     for col in TARGET_COLS:
         cols = [c for c in train_feat.columns if c not in DROP_COLS_PER_TARGET[col]]
+        fit_cols = [c for c in cols if c != "ec_high_confidence"] if col == "soil_ec" else cols
 
         final_params = {**MODEL_PARAMS[col], "n_estimators": n_estimators_per_target[col],
                          "random_state": RANDOM_STATE, "verbosity": -1}
         final_lgbm = lgb.LGBMRegressor(**final_params)
-        final_lgbm.fit(train_feat[cols], train_y[col])
+        final_lgbm.fit(train_feat[fit_cols], train_y[col])
 
         if col == "soil_temp":
             col_med = train_feat[cols].median()
@@ -314,6 +395,10 @@ def main():
             ridge = Ridge(alpha=TEMP_BLEND_ALPHA)
             ridge.fit(tr_scaled, train_y[col])
             models[col] = BlendModel(final_lgbm, ridge, scaler, col_med, TEMP_BLEND_W_RIDGE)
+        elif col == "soil_ec":
+            high_mask = train_feat["ec_high_confidence"] >= 0.99
+            high_regime_value = train_y.loc[high_mask, col].mean()
+            models[col] = ECBlendModel(final_lgbm, fit_cols, high_regime_value)
         else:
             models[col] = final_lgbm
 
