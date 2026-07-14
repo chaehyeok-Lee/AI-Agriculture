@@ -217,12 +217,12 @@ FOLD_CUTOFFS = [118, 122, 126, 130]
 MODEL_PARAMS = {
     "soil_moisture": {"n_estimators": 1000, "learning_rate": 0.05},
     "soil_ec":       {"n_estimators": 2000, "learning_rate": 0.03, "min_child_samples": 50},
-    "soil_temp":     {"n_estimators": 1000, "learning_rate": 0.05, "num_leaves": 8, "feature_fraction": 0.8, "reg_lambda": 3.0},
+    "soil_temp":     {"n_estimators": 1000, "learning_rate": 0.05, "num_leaves": 8, "feature_fraction": 0.8, "reg_lambda": 3.0, "min_child_samples": 5},
 }
 
-# alpha=0.05(약한 정규화), w=0.30(Ridge 30% + LightGBM 70%) — lag576+wind+정규화 최적화
-TEMP_BLEND_ALPHA = 0.05
-TEMP_BLEND_W_RIDGE = 0.30
+# alpha=0.01(최소 정규화), w=0.30(Ridge 30% + LightGBM 70%) — Ridge alpha 재탐색
+TEMP_BLEND_ALPHA = 0.01
+TEMP_BLEND_W_RIDGE = 0.35
 
 
 class BlendModel:

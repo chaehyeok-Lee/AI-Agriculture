@@ -745,3 +745,79 @@ fold4(짧은 학습 구간)의 과적합이 대폭 억제됨. EC/moisture에는 
 **EC 고유값**: 3,227개 (정상, 팬OFF→팬ON→팬OFF 물리적 EC 패턴 유지)
 
 
+---
+
+# 셀프 피드백 루프 8 — 26.07.14 (루프7 이후 계속)
+
+## 기준선 (루프 시작 시점 — 루프7 최종)
+| 타깃 | 4-fold mean |
+|---|---|
+| soil_moisture | 1.0535 |
+| soil_ec | 0.3033 |
+| soil_temp | 0.5586 |
+
+---
+
+## 실패 실험 목록
+
+| 실험 | 결과 |
+|---|---|
+| vent2 features(mean/last/trend1d) 제거 → temp | +2.7% 악화 |
+| day_of_week sin/cos 순환 피처 → 전체 | moisture +2.7%, temp +8.5% 악화 (26일 데이터 부족) |
+| humidity_mean lags(MOISTURE_LAG_EXCLUDE 활성화) → moisture | +0.7% 악화 |
+| feature_fraction=0.75 → temp | +2.4% 악화 |
+| feature_fraction=0.85 → temp | +1.5% 악화 |
+| num_leaves=7 → temp | +1.5% 악화 |
+| W_RIDGE=0.25 → temp | +0.8% 악화 |
+| W_RIDGE=0.40 → temp | +0.1% 악화 (0.35보다) |
+| TEMP_BLEND_ALPHA=0.1 → temp | +0.1% 악화 |
+| TEMP_BLEND_ALPHA=0.5 → temp | +0.3% 악화 |
+
+---
+
+## 채택 실험
+
+### A. min_child_samples=5 for soil_temp (미세 개선)
+
+**실험**: 10 → 5 → 3 탐색
+| min_child_samples | soil_temp CV |
+|---|---|
+| 기본(20) | 0.5586 |
+| 10 | 0.5585 |
+| 5 | **0.5579** |
+| 3 | 0.5580 |
+
+**채택**: 5. 짧은 학습 fold에서 더 세밀한 분기 허용.
+
+---
+
+### B. W_RIDGE=0.35 채택 (−0.2%)
+
+**실험**: 0.25 / 0.30 / 0.35 / 0.40 탐색 (min_child_samples=5 상태에서)
+| W_RIDGE | soil_temp CV |
+|---|---|
+| 0.25 | 0.5613 |
+| 0.30 | 0.5579 |
+| **0.35** | **0.5566** |
+| 0.40 | 0.5572 |
+
+**채택**: 0.35. min_child_samples=5로 LightGBM 성능 변화 → 최적 Ridge 비중 0.30→0.35로 이동.
+TEMP_BLEND_ALPHA=0.01은 0.1/0.5 대비 계속 최적 확인.
+
+---
+
+## 루프 8 누적 결과
+
+| 타깃 | 루프7 기준선 | 현재 | 개선율 |
+|---|---|---|---|
+| soil_moisture | 1.0535 | **1.0535** | ±0% |
+| soil_ec | 0.3033 | **0.3033** | ±0% |
+| soil_temp | 0.5586 | **0.5566** | **−0.4%** |
+
+**현재 파라미터 상태**:
+- soil_temp: n_estimators=1000, lr=0.05, num_leaves=8, feature_fraction=0.8, reg_lambda=3.0, min_child_samples=5
+- TEMP_BLEND_ALPHA=0.01, TEMP_BLEND_W_RIDGE=0.35
+- EC n_estimators=230 (best_iter 기준), W_RIDGE 없음
+
+**soil_temp 전 세션 누적**: 1.0771(최초) → 0.5566 현재 = **−48.3%**
+
