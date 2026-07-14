@@ -8,7 +8,7 @@ import pickle
 
 import pandas as pd
 
-from preprocess import build_features, add_ec_high_confidence
+from preprocess import build_features, add_ec_high_confidence, add_ms_band_features
 from train import (
     DROP_COLS_PER_TARGET, TARGET_COLS,
     add_trend_features, add_lag_features, add_rolling_features, add_cyclic_features,
@@ -62,6 +62,8 @@ def main():
     combined_feat = add_rolling_features(combined_feat)
     combined_feat = add_cyclic_features(combined_feat)
     combined_feat = add_ec_high_confidence(combined_feat, combined_raw)
+    # MS 밴드 피처는 예측에 쓰이는 test 구간(day>=135) 행만 살아남으므로 test split만 조회하면 충분
+    combined_feat = add_ms_band_features(combined_feat, "dataset", "test")
 
     # test 구간(DAT135~)만 잘라냄 — train 부분은 컨텍스트 공급 역할만 하고 버림
     test_feat = combined_feat[combined_feat.index >= pd.Timedelta(days=135)]

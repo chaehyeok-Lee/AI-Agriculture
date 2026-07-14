@@ -122,7 +122,7 @@ Ridge NaN 처리: train column median으로 대체 후 StandardScaler.
 | polynomial (temp², temp×hour) | soil_temp +4% | Ridge 성분과 충돌 |
 | EC 상호작용 (humidity×co2, vent1×vent2) | EC 0.0% 중립 | 기존 피처 이미 포착 |
 
-### 다분광 이미지 (전부 폐기)
+### 다분광 이미지 (실질 개선 없음 — 필수 요건 대응으로 최소 반영)
 **근본 한계**: 카메라 파장 713~920nm (적색에지~근적외선만). 가시광(400~700nm)이나 단파적외선(SWIR, 1200nm+) 없음.
 
 | 방법 | 결과 | 이유 |
@@ -133,9 +133,18 @@ Ridge NaN 처리: train column median으로 대체 후 StandardScaler.
 | NDRE/CRE/Stress 식생지수 | EC 0.0% 중립 | day_num과 공선형(계절 추세) |
 | Otsu 이진화 캐노피 커버 | EC 0.0% 중립 | day_num과 공선형 |
 | 캐노피 밀도 proxy (raw/masked 비율) | moisture/temp 악화 | 잡음 추가 |
+| v2 MSC(NDRE 등 6종) v1에 직접 융합 | EC +0.0009% | 노이즈 이하, 무의미 |
+| **band9/10(897/920nm) ffill, EC 전용** | **EC +0.0006%** | **✅ train.py 채택(악화 최소화 우선)** |
+| band9/10, temp 전용 | temp +3.4% 악화 | ❌ |
+| 전체 10밴드, EC/temp | EC +0.005%, temp +6.4% 악화 | ❌ |
 
 **알 수 있는 것**: 엽록소 함량(NDRE), 엽면적지수(LAI), 생육 단계. 생육 모니터링 용도에 적합.  
 **알 수 없는 것**: EC/염류 스트레스(가시광·SWIR 필요), 수분 스트레스(970nm+).
+
+**26.07.14 결론**: 다분광 활용이 필수 요건이라 재검토했지만 10여 종의 접근이 전부 같은
+결론(EC 중립, moisture/temp 악화)에 수렴 — 피처 설계 문제가 아니라 카메라 파장대의
+물리적 한계로 최종 확정. `band9/10(EC 전용)`만 "악화 최소화" 기준으로 채택해 반영함
+(성능 개선이 아니라 요건 충족 목적, FEEDBACK.md 루프10 참고).
 
 ---
 

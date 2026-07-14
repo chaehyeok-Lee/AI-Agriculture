@@ -72,10 +72,17 @@ import pandas as pd
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
-from preprocess import build_features, load_target, add_ec_high_confidence
+from preprocess import build_features, load_target, add_ec_high_confidence, add_ms_band_features
 
 RANDOM_STATE = 42
 TARGET_COLS = ["soil_moisture", "soil_ec", "soil_temp"]
+
+# 다분광 밴드9/10(897/920nm, NIR 끝단) — soil_ec 전용. PLAN.md에 미구현으로 남아있던
+# "밴드 평균 그룹에 뭉개지 말고 개별 피처로" 아이디어를 구현. 4-fold 검증(FEEDBACK.md
+# 루프10) 결과 EC +0.0006%(사실상 무변화) — 다분광 활용이 필수 요건이라 채택하되,
+# 실질적 성능 기여는 없다고 문서화해둠(카메라 파장 713~920nm로는 EC 직접 측정 불가라는
+# 기존 결론과 일치). moisture/temp는 전부 악화(+3~6%)로 확인돼 격리.
+MS_BAND_COLS = ["ms_band9_mean", "ms_band10_mean"]
 
 # X변수(구동기/날씨) 추세 피처
 # thermal_curtain/solar_radiation → EC 전용(-0.9%), moisture/temp는 _ZERO로 제외
@@ -128,7 +135,7 @@ _ZERO_MOISTURE = [
     "circ_fan_mean_roll144", "greenhouse_roof_vent1_mean_roll144",
     "temperature_mean_roll144", "humidity_mean_roll144",
     "wind_speed_outside_roll144", "wind_speed_outside_roll288",
-    "ec_high_confidence",
+    "ec_high_confidence", "ms_band9_mean", "ms_band10_mean",
 ]
 _ZERO_EC = [
     "circ_fan_last", "circ_fan_max", "circ_fan_mean", "circ_fan_mean_lag12",
@@ -166,7 +173,7 @@ _ZERO_TEMP = [
     "temperature_outside_mean_lag12", "temperature_outside_mean_lag36",
     "temperature_outside_mean_lag72", "temperature_outside_mean_lag144",
     "temperature_outside_mean_lag288", "temperature_outside_mean_lag576",
-    "ec_high_confidence",
+    "ec_high_confidence", "ms_band9_mean", "ms_band10_mean",
 ]
 
 DROP_COLS_PER_TARGET = {
@@ -362,6 +369,7 @@ def main():
     train_feat = add_rolling_features(train_feat)
     train_feat = add_cyclic_features(train_feat)
     train_feat = add_ec_high_confidence(train_feat, train_raw)
+    train_feat = add_ms_band_features(train_feat, "dataset", "train")
     train_y = load_target("dataset/train/env/train_y.csv")
 
     print("=== 4-fold 시계열 교차검증 (더 신뢰할 수 있는 지표) ===")

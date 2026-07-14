@@ -5,6 +5,9 @@
 - train.py / inference.py (Docker 실행용): input/dataset/... (채점 시 실제 마운트되는 경로)
   input/dataset/는 대회 측이 준 샘플(1일치)이라 전체 검증엔 못 씀 — 구조 확인용
 """
+import os
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -149,6 +152,61 @@ def add_ec_high_confidence(feat_df, raw_df):
     conf = compute_ec_high_confidence(raw_df)
     feat_df = feat_df.copy()
     feat_df["ec_high_confidence"] = feat_df["day_num"].map(conf).fillna(0.0)
+    return feat_df
+
+
+MS_CUBE_BANDS, MS_CUBE_LINES, MS_CUBE_SAMPLES = 10, 1024, 1280  # ENVI BSQ, uint16, 713~920nm 10밴드
+
+
+def _read_ms_cube(session_folder, stride=4):
+    """ms 세션 폴더의 cube.raw(ENVI BSQ, uint16, 10밴드)를 읽어 (10, L/stride, S/stride) 배열로 반환.
+    stride로 다운샘플링해 속도 확보(픽셀별 정밀도가 필요 없는 밴드평균 용도라 무손실일 필요 없음)."""
+    raw = np.fromfile(os.path.join(session_folder, "cube.raw"), dtype="<u2")
+    return raw.reshape(MS_CUBE_BANDS, MS_CUBE_LINES, MS_CUBE_SAMPLES).astype(np.float32)[:, ::stride, ::stride]
+
+
+def compute_daily_band_means(root, split, bands=(9, 10)):
+    """다분광 원본 큐브에서 지정 밴드(1-indexed, 기본 9·10번=897·920nm NIR 끝단)의
+    일별 평균 반사값을 계산 — 그날 촬영된 모든 세션(위치 무관)의 평균.
+
+    PLAN.md에 "897·920nm를 NIR 평균 그룹에 뭉개지 말고 별도 피처로 남기는 걸 권장"이라고
+    적혀 있었으나 미구현이던 아이디어를 실제로 구현. 4-fold 검증 결과(FEEDBACK.md 루프10)
+    soil_ec에 +0.0006%(사실상 무변화, 노이즈 이하) — 유의미한 개선은 아니지만 악화도
+    아니라서, 다분광 데이터 활용이 필수 요건일 때 안전하게 포함 가능한 최선의 선택지.
+    day_num(int) -> {band: 평균값} 딕셔너리 반환. 세션이 없는 날은 결과에서 제외(NaN 처리
+    는 호출부에서 day_num 매핑 시 자동으로 됨)."""
+    base = os.path.join(root, split, "ms")
+    if not os.path.isdir(base):
+        return {}
+    daily = {}
+    for dat_folder in sorted(os.listdir(base)):
+        dd = os.path.join(base, dat_folder)
+        m = re.match(r"DAT(\d+)", dat_folder)
+        if not os.path.isdir(dd) or not m:
+            continue
+        day = int(m.group(1))
+        vals = {b: [] for b in bands}
+        for sess in sorted(os.listdir(dd)):
+            sess_path = os.path.join(dd, sess)
+            if not os.path.isdir(sess_path) or not os.path.exists(os.path.join(sess_path, "cube.raw")):
+                continue
+            cube = _read_ms_cube(sess_path)
+            for b in bands:
+                vals[b].append(float(cube[b - 1].mean()))
+        if any(vals.values()):
+            daily[day] = {b: (float(np.mean(v)) if v else np.nan) for b, v in vals.items()}
+    return daily
+
+
+def add_ms_band_features(feat_df, root, split, bands=(9, 10)):
+    """build_features() 결과(5분 그리드)에 다분광 밴드 평균 컬럼(ms_bandN_mean)을
+    day_num 매핑으로 추가. 세션이 없는 날/그리드 시작 전 구간은 NaN(그날 촬영이 없거나
+    ms 폴더 자체가 없는 경우 — LightGBM이 결측을 그대로 학습에 활용)."""
+    daily = compute_daily_band_means(root, split, bands)
+    feat_df = feat_df.copy()
+    for b in bands:
+        col = f"ms_band{b}_mean"
+        feat_df[col] = feat_df["day_num"].map(lambda d: daily.get(int(d), {}).get(b, np.nan))
     return feat_df
 
 
