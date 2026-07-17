@@ -33,8 +33,13 @@ SUMMARY.md/README.md 동기화 완료.
 - ✅ **0-importance 피처 제거** — 4-fold 전체에서 한 번도 안 쓰인 컬럼 타깃별 제거
 - ✅ **soil_ec min_child_samples=50** — 보수적 분기, -0.4%
 - ✅ **soil_ec lr=0.03, n_est=2000** — 세밀 탐색
-- ✅ **soil_temp Ridge+LightGBM 앙상블** (w=0.40) — -8.4% 추가 개선, BlendModel 클래스
+- ✅ **soil_temp Ridge+LightGBM 앙상블** (초기 alpha=0.1/w=0.40, -8.4%) → **루프6~8 재탐색으로 alpha=0.01/w=0.35 갱신, 최종 -48.2%**, BlendModel 클래스
 - ✅ **inference.py cold start 수정** — train+test 연결 후 피처 계산, test 1일 lag NaN 38.6%→0%
+- ✅ **soil_temp 정규화** (num_leaves=8, feature_fraction=0.8, reg_lambda=3.0, min_child_samples=5, 루프7~8) — LightGBM 단독 대폭 개선, moisture와 정반대로 정규화가 도움됨
+- ✅ **lag/rolling 확장** (LAG_STEPS에 2일=576 추가, ROLL_WINDOWS에 12h=144 추가, wind_speed_outside lag/rolling 추가 — temp 전용) — 루프6~7
+- ✅ **circ_fan_on_binary / circ_fan_regime 이진 레짐 피처** — EC 고유값 개선(1,410→3,250), 루프6
+- ✅ **ECBlendModel 소프트 블렌드** (`ec_high_confidence`, preprocess.py) — test 141~143일 고EC 재현 패턴 대응, EC 0.3033→0.2899(-4.4%), 루프9
+- ✅ **다분광 band9/10(897/920nm) EC 전용 채택** — 성능 개선 목적 아닌 "다분광 필수 요건 충족" 목적, EC 사실상 무변화(+0.0006%), 루프10
 
 ### 폐기 확정 (재시도 금지)
 - ❌ 선형+LightGBM 하이브리드(EC) — 음수EC + val 악화

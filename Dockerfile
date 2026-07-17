@@ -1,14 +1,25 @@
-# 베이스 이미지 자유(재현성을 위해 버전 고정 권장)
-FROM python:3.13-slim
+# 재현성을 위해 베이스 이미지와 의존성 버전을 모두 고정한다.
+FROM python:3.11-slim
 
-# 필수: 작업 디렉터리 'app' 은 제출물 폴더 루트로 고정
+# 필수: 작업 디렉터리를 제출물 루트로 고정
 WORKDIR /app
+
+RUN pip install --no-cache-dir \
+        numpy==1.26.4 \
+        pandas==2.2.2 \
+        scipy==1.13.1 \
+        scikit-learn==1.4.2 \
+        lightgbm==4.3.0
+
 COPY . /app
 
-# 아래는 자유롭게 작성 (의존성 설치 등). 본 샘플은 표준 라이브러리만 사용.
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+# 운영진이 볼륨으로 주입하는 경로 (코드는 이 상대 경로를 고정 사용)
+RUN mkdir -p /app/input /app/output /app/model
 
+# 스레드 수를 고정해 부동소수 누적 순서를 결정적으로 만든다
+ENV OMP_NUM_THREADS=4 \
+    PYTHONHASHSEED=0 \
+    PYTHONUNBUFFERED=1
 
-# 진입점: train.py -> inference.py (운영진 검증 시 override 가능)
+# 검증: docker run ... sh -c "python train.py && python inference.py"
 CMD ["sh", "-c", "python train.py && python inference.py"]

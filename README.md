@@ -1,4 +1,4 @@
-# 온라인테스트1 — 생육환경 예측 (26.07.13 최종)
+# 온라인테스트1 — 생육환경 예측 (26.07.14 최종)
 
 ```bash
 # 실행 순서
@@ -29,13 +29,15 @@ docker run --rm -v "$PWD/input:/app/input" -v "$PWD/output:/app/output" \
 
 ## 모델 구조 요약
 
-### 피처 파이프라인 (`train.py` → `inference.py` 동일하게 적용)
+### 피처 파이프라인 (`train.py` → `inference.py` 동일하게 적용) — 26.07.14 갱신
 ```
 build_features(raw_X)           # preprocess.py: 1분→5분 집계, clip, day_num/hour
-→ add_trend_features()          # X변수 1일 전 대비 변화량 (7개 컬럼)
-→ add_lag_features()            # 1h/3h/6h/12h/1일 전 값 (5컬럼 × 5lag = 25개)
-→ add_rolling_features()        # 1일/2일 rolling mean+std + accel + humidity 3일
-→ add_cyclic_features()         # hour sin/cos 인코딩
+→ add_trend_features()          # X변수 1일 전 대비 변화량 (9개 컬럼, thermal_curtain/solar_radiation는 EC 전용)
+→ add_lag_features()            # 1h~2일 전 값 (7컬럼 × 6lag = 42개, temp_outside=EC전용/wind_speed=temp전용)
+→ add_rolling_features()        # 12h/1일/2일 rolling mean+std + accel + humidity 3일 + circ_fan_on_binary/regime
+→ add_cyclic_features()         # hour + wind_direction_outside sin/cos
+→ add_ec_high_confidence()      # (EC 전용) 고EC 관리이벤트 소프트 신뢰도 [0,1] — preprocess.py
+→ add_ms_band_features()        # (EC 전용) 다분광 band9/10(897/920nm) 일별 평균 — preprocess.py
 ```
 
 **⚠️ inference.py 주의**: train_X + test_X를 연결해서 피처 계산 후 test 부분만 슬라이싱.
@@ -44,14 +46,14 @@ build_features(raw_X)           # preprocess.py: 1분→5분 집계, clip, day_n
 ### 타깃별 모델
 | 타깃 | 모델 | 특이사항 |
 |---|---|---|
-| soil_moisture | LightGBM (n_est=1000, lr=0.05) | lag 피처 전부 제외 (day_num 중심) |
-| soil_ec | LightGBM (n_est=2000, lr=0.03, min_child=50) | 외삽 구조적 한계 |
-| soil_temp | **Ridge(α=0.1) × 0.40 + LightGBM × 0.60** | BlendModel 클래스 |
+| soil_moisture | LightGBM (n_est=1000, lr=0.05, 기본 정규화) | lag 피처 전부 제외(day_num 중심), 22개 추가시도 전부 실패로 구조적 한계 확정 |
+| soil_ec | LightGBM(n_est=2000, lr=0.03, min_child=50) + `ECBlendModel`(고EC 신뢰도 소프트 블렌드) | 4-fold 0.2899 |
+| soil_temp | Ridge(α=0.01)×0.35 + LightGBM(num_leaves=8, feature_fraction=0.8, reg_lambda=3.0, min_child=5)×0.65 | `BlendModel` 클래스, 4-fold 0.5583 |
 
-### 타깃별 피처 제외 규칙 (`DROP_COLS_PER_TARGET`)
-- **soil_moisture**: lag 피처 25개 전부 제외 + 0-importance 16개
-- **soil_ec**: 0-importance 41개만 제거 (day_num/lag/rolling 전부 유지)
-- **soil_temp**: day_num 제외 + rolling mean 8개 제외 + 0-importance 19개
+### 타깃별 피처 제외 규칙 (`DROP_COLS_PER_TARGET`, 26.07.14 기준 실측)
+- **soil_moisture**: lag 피처 42개 전부 제외 + 0-importance 등 27개 (총 69개 제외)
+- **soil_ec**: 0-importance 등 55개만 제거 (day_num/lag/rolling/ec_high_confidence/ms_band 전부 유지)
+- **soil_temp**: day_num 제외 + rolling(temperature_mean 계열 제외) + 0-importance 등 (총 40개 제외)
 
 ---
 
@@ -87,12 +89,18 @@ wind_direction_outside(0~360도)도 같은 원형 문제라 26.07.13에 sin/cos 
 "확실한 개선"은 아니지만 "지금 조합을 건드리면 검증 가능하게 나빠진다"는 근거로 **코드는
 그대로 유지**(train.py 피처/로직 변경 없음). soil_ec/soil_temp는 이 재검증 대상 아님.
 
-### ✅ Ridge + LightGBM 앙상블 for soil_temp (채택, BlendModel)
+**🆕 8라운드 22개 추가시도 전부 실패 (26.07.14, 루프11)**: soil_temp급 정밀 튜닝(정규화
+그리드서치, 신규 피처, 레짐지속시간, 부스팅 알고리즘/lr/멀티시드, 커튼불일치/단조제약/
+huber loss, dead-code 활성화/로그변환, 다분광 위치0, HistGradientBoosting)을 전부
+시도했으나 22개 전부 실패 — soil_ec와 동일한 성격의 구조적 한계로 최종 확정. 4-fold mean
+**1.0541** 유지, train.py 변경 없음. 상세: FEEDBACK.md 루프11(라운드1~8).
+
+### ✅ Ridge + LightGBM 앙상블 for soil_temp (채택, BlendModel) — 26.07.14 갱신
 **이유**: soil_temp가 temperature_mean과 선형 관계가 강해 Ridge의 선형 외삽이 유효. LightGBM은 비선형/시간대 패턴 담당.  
-**탐색**: alpha ∈ {0.1, 1.0, 10.0}, w_ridge ∈ 0.0~0.70 그리드 → alpha=0.1, w=0.40 최적.  
-**효과**: LightGBM 단독 0.8338 → **0.7636 (-8.4%)**. 모든 fold 균등 개선.  
+**최초 탐색(26.07.13)**: alpha ∈ {0.1, 1.0, 10.0}, w_ridge ∈ 0.0~0.70 그리드 → alpha=0.1, w=0.40, 0.8338→0.7636(-8.4%).  
+**이후 루프6~8 재탐색**: wind_direction/roll144 추가(→0.6716) + num_leaves=8·feature_fraction=0.8·reg_lambda=3.0 정규화(→0.5588) + min_child_samples=5·alpha=0.01·w_ridge=0.35(→**0.5583**) — 기준선(1.0771) 대비 **-48.2%**.  
 **구현**: BlendModel 클래스 (predict() 인터페이스 동일 → inference.py 수정 불필요).  
-Ridge NaN 처리: train column median으로 대체 후 StandardScaler.
+Ridge NaN 처리: train column median으로 대체 후 StandardScaler. 상세: FEEDBACK.md 루프6~8, SUMMARY.md soil_temp 섹션.
 
 ---
 
@@ -150,16 +158,17 @@ Ridge NaN 처리: train column median으로 대체 후 StandardScaler.
 
 ## EC 구조적 한계 (핵심)
 
-EC 4-fold 분포: **[0.53, 0.08, 0.60, 0.02]** — mean 0.3065.
+EC 4-fold 분포(26.07.14, `ECBlendModel` 소프트 블렌드 반영 후): **[0.530, 0.093, 0.515, 0.021]** — mean **0.2899**
+(이전 LightGBM 단독 기준선은 [0.53, 0.08, 0.60, 0.02], mean 0.3065 — fold3이 0.60→0.52로 개선된 게 대부분).
 
 | fold | val 구간 | EC 패턴 | RMSE | 개선 가능성 |
 |---|---|---|---|---|
-| 1 | 118~122 | **0.55→1.7 급등** (day121) | 0.531 | ❌ 없음 — 시비 결정, X변수 신호 없음 |
-| 2 | 122~126 | 1.7 안정 | 0.078 | 이미 우수 |
-| 3 | 126~130 | **1.7→0.4 급락** (day129 팬ON) | 0.595 | ❌ 없음 — 훈련에 "팬ON→EC급락" 사이클 없음 |
-| 4 | 130~134 | 0.4 안정 | 0.022 | 이미 우수 |
+| 1 | 118~122 | **0.55→1.7 급등** (day121) | 0.530 | ❌ 없음 — 시비 결정, X변수 신호 없음 |
+| 2 | 122~126 | 1.7 안정 | 0.093 | 이미 우수 |
+| 3 | 126~130 | **1.7→0.4 급락** (day129 팬ON) | 0.515 | ⚠️ 소프트 블렌드로 일부 개선(0.595→0.515), 완전 해결은 아님 |
+| 4 | 130~134 | 0.4 안정 | 0.021 | 이미 우수 |
 
-**4-fold mean 0.31은 과대추정**: test(DAT135~146)가 day134의 EC~0.4, 팬ON 상태에서 이어지는 안정 레짐이면 실제 test RMSE ≈ fold4 수준(0.02~0.08).
+**4-fold mean 0.29도 과대추정 가능성**: test(DAT135~146)가 day134의 EC~0.4, 팬ON 상태에서 이어지는 안정 레짐이면 실제 test RMSE ≈ fold4 수준(0.02~0.09).
 
 ### 🆕 소프트 블렌드로 test 141~143일 고EC 후보 대응 (26.07.14 루프9)
 

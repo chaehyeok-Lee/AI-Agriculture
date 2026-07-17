@@ -31,7 +31,7 @@ from src import structure as ST
 from src import temp_model as TM
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-IN = os.path.join(ROOT, "input", "dataset")
+IN = os.path.join(ROOT, "dataset")
 MODEL = os.path.join(ROOT, "model")
 TARGETS = ["soil_moisture", "soil_ec"]          # LightGBM 그룹 모델
 TEMP = "soil_temp"                              # 전용 앙상블
