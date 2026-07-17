@@ -48,9 +48,14 @@ PARAMS = {
     "soil_moisture": dict(n_estimators=1200, learning_rate=0.03, num_leaves=63,
                           min_child_samples=80, subsample=0.6, subsample_freq=1,
                           colsample_bytree=0.5, reg_lambda=5.0, reg_alpha=0.5),
+    # soil_ec: 26.07.17 하이퍼파라미터 전용 총력전(배깅/dart/goss/n_estimators단독탐색/
+    # 100회 확장랜덤서치) 결과 — boosting_type='goss'만 바꾸는 게 유일하게 6-fold 전부
+    # 일관 개선(mean -6.3%, 0.0520->0.0487). 다른 값까지 같이 튜닝하면 오히려 악화되어
+    # 나머지는 기존값 그대로 유지. goss는 자체 샘플링을 쓰므로 subsample 계열은 무의미해
+    # 제거(bagging_fraction 관련 경고 방지).
     "soil_ec": dict(n_estimators=2000, learning_rate=0.03, num_leaves=7,
-                    min_child_samples=80, subsample=0.8, subsample_freq=1,
-                    colsample_bytree=0.6, reg_lambda=5.0),
+                    min_child_samples=80, colsample_bytree=0.6, reg_lambda=5.0,
+                    boosting_type="goss"),
     "soil_temp": dict(n_estimators=1200, learning_rate=0.03, num_leaves=31,
                       min_child_samples=40, subsample=0.8, subsample_freq=1,
                       colsample_bytree=0.7, reg_lambda=1.0),
